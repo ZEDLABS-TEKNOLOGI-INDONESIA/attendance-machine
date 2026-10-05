@@ -1,6 +1,8 @@
 # Attendance Machine
 
-**Attendance Machine** adalah solusi presensi cerdas berbasis _Internet of Things_ (IoT) yang dirancang untuk mengatasi tantangan infrastruktur jaringan yang tidak stabil. Dibangun di atas mikrokontroler ESP32-C3, sistem ini menerapkan arsitektur _Hybrid_ yang menggabungkan kemampuan pemrosesan daring (_online_) dan luring (_offline_) secara mulus.
+**Attendance Machine** adalah solusi presensi berbasis _Internet of Things_ (IoT) untuk lingkungan dengan jaringan yang tidak stabil. Dibangun di atas ESP32-C3, sistem ini memakai arsitektur _hybrid_: presensi tetap tercatat saat offline (antrean di SD card atau buffer NVS) lalu dikirim ke server begitu koneksi kembali.
+
+Versi dokumen ini mengacu pada firmware **v2.3.6**.
 
 ---
 
@@ -9,50 +11,78 @@
 ---
 
 ## Requirements & Library
-- ESP32 C3 Super Mini
+- ESP32-C3 Super Mini (board profile Arduino: `ESP32C3 Dev Module`)
 - Module RFID Reader (MFRC522)
-- Buzzer Pasif
+- Buzzer pasif
 - OLED 0.96" (Adafruit SSD1306 + Adafruit GFX Library)
-- Module SD Card (SDFat — Legacy Memory Card Support)
-- Module 4056 (charger baterai)
-- Battery
-- ArduinoJson
-- Adafruit BusIO
+- Module SD Card (SdFat)
+- Module 4056 (charger baterai) + baterai
+- ArduinoJson 7.4.3, Adafruit BusIO 1.17.4
+
+### Pin
+
+| Fungsi | GPIO |
+|---|---|
+| SPI SCK / MOSI / MISO | 4 / 6 / 5 |
+| RFID SS / RST | 7 / 3 |
+| SD CS | 1 |
+| OLED SDA / SCL | 8 / 9 |
+| Buzzer | 10 |
+| Tombol BOOT (factory reset) | 0 |
 
 ## Environment Tools
+
 | Item | Keterangan |
 |---|---|
-| Tools | Arduino IDE v2.3.6 |
-| Board | ESP32 v3.3.12 |
-| Schema Partition | Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS) |
+| Tools | Arduino IDE 2.3.6 / arduino-cli |
+| Board package | esp32 (Espressif) 3.3.12 |
+| Partition scheme | Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS) |
 | Author | Yahya Zulfikri |
-| Version | v2.3.3 |
+| Version | v2.3.6 |
 | Backend | Laravel 11 + Filament 3 (PHP 8.4), di belakang Cloudflare proxy |
+
+> Warning kompilasi dari library (`#warning File not defined because __has_include(FS.h)`, `"FILE_READ" redefined`, `"FILE_WRITE" redefined`) berasal dari tabrakan makro SdFat dan `FS.h` (ditarik `WebServer.h`). Kode firmware tidak memakai makro itu, jadi aman diabaikan.
 
 ---
 
 ## Arsitektur Task / Concurrency
-Firmware berjalan di atas FreeRTOS dengan 1 loop utama + 3 task paralel yang jalan terus-menerus setelah `setup()` selesai — bukan alur linear sekali jalan.
 
-| Task | Fungsi | Prioritas | Stack | Core |
-|---|---|---|---|---|
-| `loop()` (main) | Baca kartu fisik RFID → masukkan ke queue, cek jadwal sleep tiap iterasi, trigger deep sleep | – | – | – |
-| `taskRfid` | Proses antrian scan (debounce, validasi, kirim presensi) | 3 (tertinggi) | 8192 | Core 0 |
-| `taskSync` | Reconnect WiFi, health check SD, OTA, sync data, telemetry, remote config, resync time | 2 | 8192 | Core 0 |
-| `taskDisplay` | Update OLED, cek jadwal dim, cek factory reset | 1 (terendah) | 12288 | Core 0 |
+Firmware berjalan di FreeRTOS dengan 1 loop utama + 3 task. ESP32-C3 hanya punya satu core, jadi semua task berbagi core yang sama dan saling menyela lewat preemption.
 
-**Sinkronisasi antar task:**
-- `loop()` → `taskRfid`: via **FreeRTOS Queue** (`xRfidQueue`), pola *producer-consumer*.
-- Resource bersama (SD, Display, Config) diproteksi pakai **Mutex/Semaphore** (`xSdMutex`, `xDisplayMutex`, `xConfigMutex`) agar tidak terjadi race condition antar task.
+| Task | Fungsi | Prioritas | Stack |
+|---|---|---|---|
+| `loop()` (main) | Polling RC522 (di bawah mutex SD) → masukkan ke queue, cek jadwal sleep, trigger deep sleep | – | – |
+| `taskRfid` | Proses antrean scan (debounce, validasi, simpan/kirim presensi) | 3 | 8192 |
+| `taskSync` | Reconnect WiFi, health check SD, OTA, RFID DB, sync data, telemetry, remote config, resync waktu | 2 | 8192 |
+| `taskDisplay` | Update OLED, jadwal dim, factory reset | 1 | 12288 |
+
+**Sinkronisasi:**
+- `loop()` → `taskRfid`: FreeRTOS Queue (`xRfidQueue`), pola producer-consumer.
+- Mutex: `xSdMutex` (SD **dan** bus SPI bersama RC522), `xDisplayMutex`, `xConfigMutex`, `xNvsMutex` (objek `Preferences` global), `xCacheMutex` (cache RFID).
+- Urutan kunci: `xSdMutex` dulu, baru `xCacheMutex`. Fungsi lookup RFID tidak mengambil mutex SD.
+- Setiap request HTTPS membuat `WiFiClientSecure` sendiri, sehingga sesi TLS antar task tidak saling merusak.
 
 ---
 
 ## Keamanan Data / Kredensial
-Semua kredensial sensitif (SSID, password WiFi ×3, API Key, API URL) **tidak pernah disimpan plaintext** di NVS. Alur enkripsi:
 
-1. **Key derivation** — Key AES-128 diturunkan dari MAC address unik device + salt tetap, di-hash dengan SHA-256 (`deriveAesKey`). Key berbeda tiap device dan tidak hardcoded di source code.
-2. **Enkripsi** — Data dienkripsi dengan AES-128-CBC (`mbedtls_aes_crypt_cbc`) + random IV per record, sebelum disimpan lewat `prefs.putBytes()`.
-3. **Dekripsi** — Saat dibutuhkan (boot / konek WiFi), data didekripsi kembali ke RAM saja, tidak pernah tersimpan plaintext di storage.
+Kredensial (SSID, password WiFi ×3, API Key, API URL, nama device) disimpan terenkripsi di NVS, bukan plaintext. Alurnya:
+
+1. **Key derivation**: key AES-128 diturunkan dari MAC address + salt tetap, di-hash SHA-256 (`deriveAesKey`).
+2. **Enkripsi**: AES-128-CBC dengan IV acak per record. Format blob: IV 16 byte + data 96 byte + panjang 1 byte. Blob format lama (65 byte) masih bisa dibaca, jadi device lama tidak minta provisioning ulang.
+3. **Dekripsi**: hanya ke RAM saat dibutuhkan.
+
+Batas panjang input: SSID 32, password WiFi 63, API Key 95, API URL 79, nama device 19 karakter. Input melebihi batas ditolak form dengan pesan jelas.
+
+> ⚠️ **Batasan enkripsi.** Salt ada di source code, MAC bukan rahasia, dan AES-CBC tanpa autentikasi. Ini melindungi dari pembacaan sekilas, **bukan** dari penyerang yang punya dump flash dan source code. Untuk perlindungan sungguhan, aktifkan flash encryption + NVS encryption ESP-IDF.
+
+- WiFi memakai `WiFi.persistent(false)`: kredensial WiFi tidak disimpan driver di `nvs.net80211`, hanya di NVS terenkripsi aplikasi.
+- Factory reset memanggil `esp_wifi_restore()` untuk menghapus sisa kredensial driver dari firmware lama.
+
+### TLS
+- Semua request HTTPS memverifikasi sertifikat dengan root CA yang tertanam (`TLS_ROOT_CA`: GTS Root R4 dan ISRG Root X1), dikendalikan `TLS_VERIFY_CERT`.
+- Jika backend pindah ke CA lain, perbarui `TLS_ROOT_CA`, jika tidak semua request akan gagal.
+- Verifikasi sertifikat bergantung pada jam sistem. Bila waktu belum valid, handshake HTTPS dapat gagal (perlu dipastikan di lapangan).
 
 ---
 
@@ -60,76 +90,86 @@ Semua kredensial sensitif (SSID, password WiFi ×3, API Key, API URL) **tidak pe
 
 ### 1. Provisioning
 Saat boot, device mengecek flag `prov` di NVS. Jika belum diprovisioning (atau kredensial WiFi/API key kosong):
-- Device masuk mode AP dengan SSID `ATTENDANCE MACHINE`, password unik per device (`ZEDLABS-XXXXXX`, di-derive dari MAC).
-- DNS Server (captive portal) + Web Server (port 80) dijalankan bersamaan agar browser otomatis redirect ke halaman setup.
-- User mengisi form (SSID ×3, API URL, API Key, nama device, jadwal sleep/dim) → data dienkripsi (lihat *Keamanan Data/Kredensial*) sebelum disimpan ke NVS.
-- Timeout keseluruhan mode provisioning: 5 menit (`PROVISIONING_TIMEOUT_MS`) — kalau tidak diisi, device restart otomatis.
+- Device masuk mode AP bernama `ATTENDANCE MACHINE`. Password AP **acak 10 karakter, dibuat baru setiap masuk mode setup, dan ditampilkan di OLED** (tidak diturunkan dari MAC).
+- DNS Server (captive portal) + Web Server (port 80) berjalan bersamaan agar browser diarahkan ke halaman setup.
+- Pengguna mengisi form: SSID ×3, API URL, API Key, nama device, jadwal sleep dan dim.
+- Timeout mode provisioning: 5 menit (`PROVISIONING_TIMEOUT_MS`), lalu device restart.
 
-**Detail Web Server Provisioning:**
-- `GET /` dan `onNotFound` → tampilkan form HTML.
-- `POST /save` → validasi input:
-  - SSID 1, API Key, API URL wajib diisi (response 400 kalau kosong).
-  - API URL wajib berawalan `http://` atau `https://`, trailing slash dihapus otomatis, maksimum 79 karakter.
-  - Nama device dipotong otomatis kalau melebihi `DEVICE_NAME_MAX_LEN` (31 karakter).
-  - Jadwal sleep/dim divalidasi rentang 0–23, fallback ke default kalau invalid.
-- Setelah tersimpan → flag `prov = true` di NVS → restart otomatis (delay 2 detik).
+**Validasi `POST /save`** (gagal = HTTP 400 dengan pesan):
+- SSID 1, API Key, API URL wajib diisi.
+- API URL **wajib `https://`**, trailing slash dihapus otomatis, maksimum 79 karakter.
+- SSID ≤ 32, password WiFi ≤ 63, API Key ≤ 95 karakter.
+- Nama device ≤ 19 karakter dan hanya huruf, angka, spasi, `-`, `_`, `.`. Nama yang melanggar **ditolak**, tidak dipotong diam-diam. Pembatasan ini mencegah koma merusak CSV antrean dan tanda kutip/backslash merusak JSON.
+- Jam sleep/dim harus angka 0–23 (kosong = default). Selain itu ditolak.
+- Jika enkripsi/penyimpanan kredensial gagal, form menjawab HTTP 500 dan flag `prov` tidak diset.
+- Setelah tersimpan → `prov = true` → restart (2 detik).
 
-> ⚠️ **Catatan Operasional**: Nama device (`devname`) diisi bebas oleh user saat provisioning dan langsung dipakai sebagai `deviceId` di seluruh komunikasi device↔server. Nama yang mengandung **spasi** (mis. "ATTENDANDE MACHINE") **aman** untuk endpoint yang mengirim `device_id` lewat JSON body (heartbeat, sync, OTA check), tapi **berpotensi bermasalah** untuk endpoint yang mengirim `device_id` lewat query string URL — lihat *Remote Config* di bawah.
+> ⚠️ **Nama device = `deviceId`** di seluruh komunikasi dengan server. Samakan persis dengan nama yang didaftarkan admin di panel. Nama berspasi aman untuk endpoint yang mengirim `device_id` lewat JSON body, dan untuk `/config` firmware melakukan URL-encoding.
 
 ### 2. Init
-- Inisialisasi watchdog per-task, OLED, buzzer, mutex (SD/Display/Config), queue RFID.
-- Load kredensial terenkripsi dari NVS, generate `deviceId` dari MAC (atau pakai nama custom kalau diisi saat provisioning).
-- Init SD card dengan retry (`reinitSDCard`), load cache RFID valid & admin list dari SD kalau tersedia.
-- Kalau SD tidak tersedia → fallback ke NVS buffer sebagai penyimpanan sementara.
+- Watchdog, OLED, buzzer, mutex, queue RFID.
+- Zona waktu di-set `WIB-7` di awal `setup()`, sehingga jam estimasi (tanpa NTP) juga WIB.
+- Load kredensial dari NVS. `deviceId` = nama custom jika diisi, selain itu `ESP32_XXXX` dari MAC.
+- Init SD card, load cache RFID dan daftar admin. Jika SD tidak ada → fallback ke buffer NVS.
+- RC522 diinisialisasi **sebelum** WiFi. Jika RC522 tidak merespons, device restart.
+- Setelah RC522 OK, firmware ditandai valid (`esp_ota_mark_app_valid_cancel_rollback()`). Kegagalan WiFi/NTP sesudahnya bukan alasan rollback.
 
 ### 3. Connect to WiFi & Internet
-- Coba konek ke 3 SSID tersimpan secara berurutan (`connectToWifi` loop).
-- Kalau berhasil connect, `pingAPI()` dipanggil untuk validasi konektivitas ke backend — bukan sekadar cek status WiFi.
-- Kalau gagal semua → device tetap lanjut jalan di **offline mode**, tidak blocking proses berikutnya.
+- Mencoba 3 SSID tersimpan berurutan.
+- Setelah terhubung, `pingAPI()` memvalidasi konektivitas ke backend, bukan sekadar status WiFi.
+- Gagal semua → lanjut **offline mode**.
 
-**Parameter Radio WiFi (`connectToWifi` / `processReconnect`):**
-- `WiFi.setTxPower(WIFI_POWER_19_5dBm)` — TX power maksimum, untuk memastikan jangkauan sinyal optimal.
-- `WiFi.setSleep(WIFI_PS_MAX_MODEM)` — mode power-save agresif, radio banyak idle untuk hemat daya.
-- `WiFi.persistent(true)` + `WiFi.setAutoReconnect(true)` — kredensial WiFi disimpan persisten di flash ESP32 dan auto-reconnect bawaan aktif berdampingan dengan state machine reconnect manual (`processReconnect`).
+**Parameter radio:** `WiFi.setTxPower(WIFI_POWER_19_5dBm)`, `WiFi.setSleep(WIFI_PS_MAX_MODEM)`, `WiFi.persistent(false)`, `WiFi.setAutoReconnect(true)` berdampingan dengan state machine reconnect manual.
 
-> ⚠️ **Catatan Troubleshooting**: Pada device dengan RSSI sangat kuat (mis. -30 dBm) namun tetap sering mengalami disconnect/reconnect berulang, penyebab yang lebih mungkin adalah **kombinasi daya (brownout saat TX burst) dan/atau mode power-save modem** — bukan kualitas sinyal. Lihat bagian *Known Issues* di bawah untuk detail diagnosis dan opsi mitigasi (`WiFi.setSleep(WIFI_PS_NONE)`, penyesuaian TX power, atau logging `WiFi.onEvent` untuk membaca disconnect reason code).
+`WiFi.onEvent()` mencatat reason code setiap disconnect ke serial (`[WIFI] disconnect reason=N`) untuk diagnosis.
 
 ### 4. Sync Time
-- NTP disinkron dari 3 server fallback: `pool.ntp.org`, `time.google.com`, `id.pool.ntp.org`.
-- Waktu tersimpan di RTC memory (`lastValidTime`) + NVS sebagai backup lintas restart.
-- Kalau NTP gagal, waktu diestimasi dari `bootTime + elapsed millis()`, dengan batas maksimum umur estimasi 12 jam (`MAX_TIME_ESTIMATE_AGE`) sebelum dianggap invalid.
-- Timezone device di-hardcode via `GMT_OFFSET_SEC = 25200L` (UTC+7 / WIB), independen dari timezone Laravel (`config('app.timezone')`) — keduanya kebetulan sama-sama Asia/Jakarta pada deployment saat ini, namun tidak ada mekanisme sinkronisasi otomatis antara keduanya kalau salah satu berubah.
+- NTP dari 3 server: `pool.ntp.org`, `time.google.com`, `id.pool.ntp.org`.
+- Waktu valid terakhir disimpan di RTC memory dan NVS (backup lintas power loss).
+- Semua fungsi memakai **satu sumber epoch** (`getEpochWithFallback()`): jam sistem jika valid, selain itu `lastValidTime + elapsed` dengan batas umur estimasi 12 jam (`MAX_TIME_ESTIMATE_AGE`). Fungsi ini tidak memblokir.
+- **Retry boot:** jika waktu tetap invalid setelah boot, device restart hingga 5 kali (`MAX_BOOT_TIME_SYNC_RETRIES`). Counter disimpan di **NVS** (`boot_retry`) agar bertahan di semua jenis reset. Setelah 5 kali, device lanjut offline, `bootTimeSyncFailed = true`, dan deep sleep dinonaktifkan sampai waktu valid.
+- Offset WIB di-hardcode (`GMT_OFFSET_SEC = 25200`), independen dari timezone Laravel.
 
 ### 5. Health Check
-- Berjalan periodik: cek SD card masih terbaca (`checkSDHealth`), cek sinyal WiFi lemah/kritis (RSSI threshold), jalankan reconnect state machine (`processReconnect`), kirim heartbeat/telemetry ke server tiap 60 detik (uptime, heap, RSSI, jumlah antrian, dll).
+- `checkSDHealth()` tiap 30 detik membaca **sektor 0 kartu** (akses nyata, bukan cache mount). Gagal 3 kali beruntun (pengecekan ulang tiap 5 detik) → `sdCardAvailable = false`, cache RFID dikosongkan, fallback ke NVS/kirim langsung. SD terdeteksi lagi → reinit dan reload tanpa restart.
+- Cek sinyal (weak -85 dBm, critical -90 dBm), reconnect state machine, heartbeat tiap **120 detik**.
 
-**Watchdog (WDT) Management:**
-- WDT normal timeout: 90 detik (`WDT_NORMAL_TIMEOUT_MS`) — berlaku saat operasi biasa.
-- Saat proses berat berjalan (sync data, OTA download) → WDT di-extend ke 180 detik (`extendWdtForSync`) agar tidak trigger reset di tengah proses panjang.
-- Setelah proses berat selesai → WDT dikembalikan ke normal (`restoreWdtNormal`).
-- Tiap task (`loop`, `taskRfid`, `taskSync`, `taskDisplay`) subscribe ke WDT masing-masing dan wajib reset (`esp_task_wdt_reset()`) di tiap iterasi — kalau satu task hang, device restart otomatis sebagai safety net.
+**Watchdog:**
+- Normal 90 detik (`WDT_NORMAL_TIMEOUT_MS`), diperpanjang 180 detik saat sync/OTA (`extendWdtForSync`), dikembalikan setelahnya.
+- Tiap task subscribe ke WDT dan wajib `esp_task_wdt_reset()` tiap iterasi.
+- Catatan: `extendWdtForSync()` tidak berefek selama `setup()` (task belum dibuat), jadi sync saat boot memakai WDT 90 detik. Setiap operasi blocking memanggil `esp_task_wdt_reset()`, risikonya kecil tetapi belum diuji untuk backlog sangat besar.
 
 ### 6. Upload Data (Sisa Data Offline)
-- Saat online kembali: sisa data di SD disinkron via `chunkedSync` (maksimum 5 file per siklus), sisa data di NVS buffer disinkron via `nvsSyncToServer`, dikirim bulk ke endpoint `/sync-bulk`.
-- Proses dipecah per file agar tidak blocking terlalu lama, watchdog di-extend selama proses berjalan.
+- **SD:** `chunkedSync()` menyinkronkan maksimum 5 file per siklus. Kuota dihitung ulang tiap siklus, jadi backlog lebih dari 5 file tetap dilanjutkan di siklus berikutnya. File antrean dicari lewat **iterasi direktori**, sehingga celah nomor file tidak membuat file tertinggal.
+- **File yang sedang disync** dilepas dari writer lebih dulu (`detachFromWriterLocked`), sehingga record baru tidak ditulis ke file yang akan dihapus.
+- **NVS:** `nvsSyncToServer()`. Setelah server mengonfirmasi, record yang ditulis selama HTTP berjalan digeser ke awal (`nvsCompactAfterSync`), tidak ikut terhapus.
+- File dihapus hanya jika server mengonfirmasi jumlah hasil sama dengan jumlah dikirim. Respons rusak/terpotong → file tetap ada dan dicoba lagi.
 
-### 7. OTA Processing (Check & Update)
-- Cek versi firmware ke server tiap interval tertentu (default 30 detik, bisa diubah via remote config).
-- Kalau versi server lebih baru (semver compare) → download & flash via `Update` library, dengan validasi MD5.
-- Reboot otomatis kalau update sukses.
-- `device_id` dikirim lewat JSON body request (`/firmware/check`), sehingga **tidak terpengaruh** isu spasi di URL yang dialami endpoint `/config`.
+### 7. OTA (Check & Update)
+- Cek versi ke `/firmware/check` tiap **10 menit** (default, bisa diubah lewat remote config). `device_id` dikirim lewat JSON body.
+- Syarat firmware diterima (semua wajib):
+  1. MD5 32 karakter hex.
+  2. URL `https://` dan **host sama dengan API** (API key tidak dikirim ke host lain).
+  3. Versi server lebih baru dari firmware berjalan (semver).
+  4. Versi tersebut belum pernah ditolak dalam sesi boot ini.
+- Unduhan memakai HTTP/1.0 (`useHTTP10(true)`) agar chunked encoding tidak menyelipkan baris ukuran di data. Ada stall timeout 30 detik, ukuran dicocokkan bila `Content-Length` ada, dan setiap `Update.write()` diperiksa.
+- **Marker versi:** firmware membawa string `FWVER:<versi>;` (`FW_MARKER`). Saat mengunduh, device memindai marker itu dan membandingkannya dengan versi dari server. Tidak ada marker / berbeda → update dibatalkan (pesan "VERSI TAK ADA" / "VERSI BEDA"), dan versi itu tidak dicoba lagi sampai reboot. Ini mencegah loop OTA tanpa henti.
+- `Update.end()` memverifikasi MD5. Gagal → "MD5 SALAH".
+- Sukses → restart otomatis.
+- **Rollback:** sketch meng-override `verifyRollbackLater()` sehingga core Arduino tidak menandai valid otomatis. Firmware ditandai valid setelah RC522 OK (lihat *Init*). Rollback hanya bekerja jika bootloader build mendukungnya, dan **belum diuji di perangkat**.
 
-### 8. Download Data RFID Terbaru — Protokol Sentinel `END`
+### 8. Download Data RFID Terbaru: Protokol Sentinel `END`
 
-> **PENTING — perubahan protokol terbaru.** Endpoint `/api/presensi/rfid-list` awalnya mengandalkan header HTTP `Content-Length` untuk menentukan kapan download selesai. Ini **tidak dapat diandalkan** pada deployment ini karena backend berada di belakang **Cloudflare** yang men-strip header `Content-Length` dan `Connection` dari response (walaupun Laravel sudah mengirimkannya secara eksplisit) — akibat perbedaan protokol HTTP/2 (Cloudflare↔origin) vs HTTP/1.1 (ESP32↔Cloudflare edge).
+Backend di belakang **Cloudflare**, yang membuang header `Content-Length` dan `Connection`, jadi `Content-Length` tidak bisa diandalkan.
 
-**Protokol final (Opsi B — Sentinel):**
-- Server **wajib** mengirim baris literal `END\n` sebagai baris terakhir response, setelah seluruh baris RFID (dan setelah baris `ver:<versi>` di awal).
-- Firmware (`downloadRfidDb()`) membaca stream baris-per-baris; begitu baris `END` terbaca, proses **langsung dianggap selesai dan sukses**, terlepas dari status koneksi (`http.connected()`) atau apakah masih ada stall timeout yang berjalan.
-- Kalau `END` **tidak pernah diterima** (koneksi putus di tengah jalan / server crash), download dianggap gagal (`connectionDroppedEarly`), file sementara (`.tmp`) dihapus, versi RFID DB lokal **tidak** di-update — sehingga percobaan berikutnya (dipicu `checkAndUpdateRfidDb()`) akan otomatis mencoba ulang.
-- Stall timeout (tidak ada data masuk sama sekali) di-set ke **120 detik** (`120000UL`) sebagai jaring pengaman terakhir kalau server hang total dan tidak mengirim `END` sama sekali.
+**Protokol:**
+- Server mengirim `ver:<versi>` di baris pertama, daftar RFID, lalu baris literal `END` di akhir.
+- Firmware membaca stream per baris. `END` diterima = selesai dan sukses. Tanpa `END` (koneksi putus, server crash) = gagal: file `.tmp` dihapus, versi lokal tidak berubah, dicoba lagi pada pengecekan berikutnya.
+- Stall timeout 120 detik sebagai jaring pengaman.
+- Unduhan memakai HTTP/1.0 (`useHTTP10(true)`).
+- **Daftar kosong yang sah** (`END` diterima, 0 kartu) bukan kegagalan: file kosong disimpan dan versi diperbarui.
 
-**Format response `/api/presensi/rfid-list`:**
+**Format:**
 ```
 ver:<versi_integer>
 <rfid_10_digit_1>
@@ -138,64 +178,66 @@ ver:<versi_integer>
 END
 ```
 
-- Baris `ver:` di awal dipakai untuk update versi RFID DB lokal (`nvsSetRfidDbVer`).
-- Tiap baris RFID divalidasi harus **persis 10 digit numerik** — baris yang tidak valid (format salah, kepanjangan >31 karakter per baris) di-skip tanpa menggagalkan keseluruhan proses.
-- File RFID DB disimpan dulu sebagai `.tmp`, baru di-rename menjadi `rfid_db.txt` setelah dipastikan lengkap (`END` diterima) — mencegah file RFID DB korup/setengah-jalan dipakai untuk validasi presensi.
+**Penyimpanan aman:**
+- Data ditulis ke `/rfid_db.tmp`, mutex SD hanya dipegang saat menulis tiap blok (bukan selama streaming), jadi scan kartu tidak ditolak saat unduhan berjalan.
+- Penggantian file aktif memakai cadangan: DB lama → `/rfid_db.bak`, `.tmp` → `/rfid_db.txt`. Jika rename gagal, DB lama dikembalikan. Jika listrik mati di tengah penggantian, `.bak` dipulihkan otomatis saat cache dimuat.
+- Tiap baris divalidasi persis 10 digit numerik, baris tidak valid dilewati.
+
+**Cache:** maksimum **5000** kartu (`RFID_CACHE_MAX`). Kartu di luar batas dibuang, dan jumlahnya ditampilkan di OLED saat boot serta dikirim di heartbeat (`rfid_db_discarded`). Cek versi DB tiap **5 menit** (`RFID_DB_CHECK_INTERVAL`).
 
 ### 9. Standby (Ready Mode)
-- Layar OLED menampilkan status online/offline, jam, jumlah antrian pending, dan indikator sinyal WiFi (bar).
-- Update layar hanya terjadi kalau ada perubahan state (`displayStateChanged`) — untuk hemat refresh & mencegah flicker.
+- OLED menampilkan status online/offline, jam, jumlah antrean (SD + NVS), dan bar sinyal WiFi.
+- Layar hanya diperbarui saat state berubah (`displayStateChanged`).
 
-### 10. Main Loop & Sleep Trigger
-- `loop()` utama bertanggung jawab atas:
-  1. Polling kartu RFID fisik (`PICC_IsNewCardPresent`) → masukkan event ke queue.
-  2. Cek jam saat ini terhadap jadwal sleep di tiap iterasi.
-  3. Kalau masuk jam sleep → set `sleepRequested = true`, tunggu semua task selesai kerja (± 5 detik), flush semua file SD, hitung durasi tidur, matikan OLED, lalu masuk **deep sleep** (`esp_deep_sleep_start()`).
-- Kalau proses sync sedang berjalan (`syncState.inProgress`), sleep ditunda dulu sampai sync selesai — mencegah data hilang atau corrupt saat mendadak tidur.
+### 10. Main Loop & Sleep
+- `loop()`: polling RC522 (dengan mutex SD, dilewati bila mutex sedang dipegang), cek jadwal sleep, trigger deep sleep.
+- **Jendela sleep** dihitung dengan `isInWindow()`: mendukung jendela yang melewati tengah malam (default 18:00–05:00) maupun tidak. **Mulai = Selesai berarti sleep dinonaktifkan.**
+- Durasi tidur dihitung sesuai jenis jendela, dibatasi minimum 60 detik dan maksimum 12 jam. Jendela lebih dari 12 jam menghasilkan satu siklus bangun singkat di tengahnya, lalu tidur lagi.
+- Sleep ditunda saat `syncState.inProgress` atau `otaInProgress`.
+- Sebelum tidur: `sleepRequested = true`, tunggu task (±5 detik), flush SD, matikan OLED, `PCD_SoftPowerDown()` pada RC522, lalu `esp_deep_sleep_start()`.
+- Sleep tidak berjalan bila `bootTimeSyncFailed` (waktu tidak dipercaya).
 
-> ⚠️ **Catatan Pengujian Remote Config**: Jendela **default** sleep adalah jam 18:00–05:00 (`SLEEP_START_HOUR_DEFAULT`/`SLEEP_END_HOUR_DEFAULT`). Kalau jendela dim OLED (via remote config) di-set berada **di dalam** rentang jam sleep default, efeknya **tidak akan pernah teramati** karena device sudah deep sleep (OLED mati total) sebelum jendela dim dimulai. Saat menguji perubahan remote config, gunakan jam pengujian di luar rentang sleep aktif device.
+> ⚠️ **Pengujian remote config:** jika jendela dim berada di dalam jendela sleep, efeknya tidak akan terlihat karena device sudah deep sleep. Uji di luar jam sleep aktif.
 
 ### 11. Tapping Process [Scan RFID]
-- Task `taskRfid` menangani antrian scan dari `loop()` (pola *ISR-like* via queue).
-- Debounce 150ms untuk UID kartu yang sama (`DEBOUNCE_TIME`).
-- RFID admin memicu mode khusus (tampilkan status device + trigger sync manual), RFID biasa lanjut ke proses validasi & kirim presensi.
+- `taskRfid` memproses queue dari `loop()`. Debounce 150 ms untuk UID yang sama.
+- UID dikonversi dari 4 byte pertama (`uidToString`). Untuk kartu 7 byte, byte sisanya tidak dipakai, pastikan aturan yang sama di server.
 
-**Mode Admin (`handleAdminScan`):**
-- Terpisah dari daftar RFID biasa — dicek lewat file khusus `/admin_rfid.txt` di SD card (maksimum 5 UID admin).
-- Saat RFID admin di-tap: OLED menampilkan status ringkas device (jumlah antrian pending + jumlah scan hari ini), lalu **memicu sync manual** (`pendingCacheDirty = true`, reset state sync) tanpa menunggu siklus periodik `taskSync`.
-- Tidak memproses presensi apa pun untuk UID admin — murni fungsi diagnostik/trigger di lapangan tanpa perlu akses ke dashboard.
+**Mode Admin** (`/admin_rfid.txt`, maksimum 5 UID):
+- OLED menampilkan `Q:<antrean SD+NVS> SC:<scan hari ini>`.
+- Mengatur flag `forceSyncRequested`. **`taskSync` yang menjalankan sync**, di siklus berikutnya tanpa menunggu interval (SD dan NVS). Status sync tidak diubah dari task lain.
+- Tidak mencatat presensi. Catatan: UID MIFARE dapat dikloning dan file admin ada di SD plaintext. Risikonya terbatas pada tampilan status dan sync manual.
 
-### 12. Validate Data [RFID & Jadwal Presensi]
-> Urutan proses: **Validate dulu, baru Save/Send.**
-- RFID dicek ke cache lokal (`isRfidInCache`) **sebelum** proses simpan/kirim apa pun.
-- Kalau RFID tidak terdaftar di cache → langsung ditolak ("RFID NONAKTIF") tanpa perlu request ke server sama sekali — hemat kuota & waktu.
-- Validasi jadwal presensi (hari libur, dsb) dilakukan di sisi **server**, direspon lewat HTTP status code:
-  - `400` → duplikat / sudah presensi
-  - `403` → hari libur
-  - `404` → RFID tidak aktif
+### 12. Validate Data
+> Urutan: **validasi dulu, baru simpan/kirim.**
+- Jika SD ada, RFID dicek ke cache lokal. Tidak terdaftar → "RFID NONAKTIF" tanpa request ke server. Lookup menunggu cache hingga 2,5 detik (selama reload), jika masih sibuk → "CACHE SIBUK".
+- Jika DB lokal **belum pernah diunduh**, scan tetap disimpan ke antrean dan server yang memvalidasi saat sync.
+- Validasi jadwal (hari libur dll) di server, lewat HTTP status: `400` duplikat, `403` hari libur, `404` RFID tidak aktif.
 
-### 13. Saving Data (Jalur SD Card Tersedia)
-- Data disimpan ke file antrian CSV (`saveToQueue`), maksimum 25 record per file.
-- Tiap record dilengkapi **CRC8 checksum** untuk deteksi korupsi saat file dibaca ulang.
-- Duplikat dicek dari beberapa file terakhir dengan window waktu 30 menit (`MIN_REPEAT_INTERVAL`).
+### 13. Saving Data (SD tersedia)
+- Antrean CSV (`/queue_N.csv`), maksimum 25 record per file, tiap record ber-CRC8.
+- Cek duplikat pada 3 file terakhir, jendela 30 menit (`MIN_REPEAT_INTERVAL`), ditambah cek scan terakhir di NVS.
+- Semua record memakai epoch dari `getEpochWithFallback()`. Filter umur (1 tahun) **hanya** diterapkan bila jam valid, dan file tidak pernah dihapus karena jam belum valid.
+- Metadata (`/queue_meta.txt`) hanya ditulis saat nomor file aktif berpindah, bukan tiap scan. Jumlah antrean dihitung ulang saat boot.
+- Pemindaian jumlah antrean melepas mutex SD di antara file, sehingga scan kartu tidak terblokir.
 
-### 14. Send Data (Jalur Fallback — SD Tidak Tersedia/Corrupt/Leak)
-- Kalau SD **tidak tersedia**, device mencoba kirim langsung ke server via HTTP (`kirimLangsung`) selama online.
-- Kalau gagal atau memang offline → data disimpan ke **NVS buffer** (maksimum 40 record) sebagai fallback terakhir, sampai muncul status "BUFFER PENUH!" kalau kapasitas habis.
+### 14. Send Data (SD tidak tersedia)
+- Online: kirim langsung (`kirimLangsung`). Gagal/offline: simpan ke **buffer NVS** (maksimum 40 record), "BUFFER PENUH!" bila habis.
 
 ### 15. Bulk Send
-- Data dikumpulkan jadi JSON array, dikirim sekali POST ke `/sync-bulk` **per file** (bukan per record) untuk efisiensi bandwidth.
-- Response per-item dicek satu per satu — item yang gagal (`status: error`) dicatat ke `failed_log.csv` (maksimum 500 baris) sebagai audit trail, tanpa menghentikan proses sinkronisasi keseluruhan.
+- Data per file dikirim sebagai JSON array ke `/sync-bulk` (bukan per record).
+- Respons dicek per item. Item `status: error` dicatat ke `failed_log.csv`. Saat mencapai 500 baris, log dirotasi menjadi `failed_log.old` (menimpa `.old` sebelumnya) dan log baru dimulai.
 
-### 16. Remote Config (Server → Device Override)
+### 16. Remote Config (Server → Device)
+- Polling `GET /api/presensi/config?device_id=<deviceId>` tiap 10 menit, dilewati bila sinyal lemah. `deviceId` di-URL-encode.
+- Field: `sleep_start`, `sleep_end`, `oled_dim_start`, `oled_dim_end`, `sync_interval_ms`, `ota_check_interval_ms`.
+- **Field yang tidak dikirim atau `null` kembali ke default firmware** pada respons 200 yang valid. Mengosongkan override di panel admin benar-benar mengembalikan default.
+- Respons yang bukan objek JSON atau JSON rusak diabaikan, konfigurasi lama dipertahankan.
+- Jam harus 0–23, interval minimal 5000 ms. Nilai tidak valid memakai default.
+- Disimpan ke NVS **hanya bila ada perubahan** (menghindari keausan flash).
+- Jendela sleep/dim dengan Mulai = Selesai diterapkan (artinya fitur nonaktif) dan dicatat di serial (`[CFG] jendela ... kosong`).
 
-- Device polling `GET /api/presensi/config?device_id=<deviceId>` tiap 10 menit (`REMOTE_CONFIG_INTERVAL`), dilewati kalau sinyal lemah (`isSignalWeak()`).
-- Field yang bisa di-override dari server: `sleep_start`, `sleep_end`, `oled_dim_start`, `oled_dim_end`, `sync_interval_ms`, `ota_check_interval_ms`. Field yang dikosongkan (`NULL`) di admin panel → tidak dikirim server → device tetap pakai default lokal firmware.
-- Perubahan disimpan persisten ke NVS (`persistRuntimeConfigToNvs`) sehingga bertahan lintas restart, tidak perlu di-fetch ulang tiap boot.
-
-> ⚠️ **PENTING — URL Encoding.** `deviceId` disisipkan ke **query string** URL request config (`?device_id=<deviceId>`), berbeda dari endpoint lain (heartbeat, sync, OTA check) yang mengirim `device_id` lewat **JSON body**. Kalau nama device mengandung karakter selain alfanumerik/`-_.~` (terutama **spasi**), URL yang terbentuk menjadi tidak valid, menyebabkan request gagal terkirim dengan benar atau server tidak menerima `device_id` yang cocok — sehingga override config **tidak pernah ter-apply**, tanpa error yang terlihat di device (silent fail, karena `if (code != 200) return;` tanpa log).
->
-> **Mitigasi**: firmware melakukan **URL-encoding** manual (`urlEncode()`) terhadap `deviceId` sebelum disisipkan ke query string endpoint `/config`. Fungsi ini meng-escape semua karakter di luar alfanumerik dan `-_.~` menjadi format `%XX`.
+> ⚠️ **Default dim 08:00–12:00** mematikan OLED di jam sibuk pagi. Jika tidak disengaja, ubah `OLED_DIM_START_HOUR_DEFAULT` dan `OLED_DIM_END_HOUR_DEFAULT`. Nilai ini juga menjadi default saat server mengirim `null`.
 
 ---
 
@@ -203,20 +245,22 @@ END
 
 | Kondisi | Penanganan |
 |---|---|
-| **Signal Leak** | Threshold *Weak* (-85 dBm): OTA check, RFID DB check, telemetry, remote config di-skip. Threshold *Critical* (-90 dBm): NTP sync & `pingAPI` di-skip total, mencegah timeout panjang yang bisa memicu watchdog reset. |
-| **Storage Leak** | `QUEUE_WARN_THRESHOLD` (48.000 file) jadi peringatan dini sebelum limit maksimum `MAX_QUEUE_FILES` (60.000). Saat limit tercapai, status `SAVE_QUEUE_FULL` dikembalikan dan device menampilkan "QUEUE PENUH!". |
-| **Storage Corrupt** | Tiap record punya CRC8 checksum (`recordCrc8`). Record dengan CRC tidak cocok otomatis di-skip saat dibaca ulang. File CSV dengan 0 valid record otomatis dihapus. |
-| **Storage Not Detected** | `checkSDHealth()` jalan tiap 30 detik. Kalau SD hilang, `sdCardAvailable = false`, cache RFID di-clear, device fallback ke jalur NVS buffer + kirim langsung via HTTP. Kalau SD terdeteksi kembali, otomatis reinit + reload cache tanpa restart. |
-| **Server Down / API Tidak Dikenali** | HTTP code selain 200 masuk kategori "SERVER ERR", record fallback ke buffer untuk dikirim ulang. Retry dengan exponential backoff (`SYNC_RETRY_DELAY_MS * 2^attempt`), maksimum `MAX_SYNC_RETRIES` (2×). |
-| **RFID DB Download Terputus** | Ditangani via sentinel `END` (lihat *Poin 8*). Koneksi putus/stall tanpa `END` diterima → file `.tmp` dihapus, versi lokal tidak berubah, retry otomatis di siklus `checkAndUpdateRfidDb()` berikutnya (tiap 60 detik, `RFID_DB_CHECK_INTERVAL`). |
-| **Fallback Kegagalan/Warning (Umum)** | Semua kegagalan silent-fail dengan feedback OLED + buzzer (error tone 3× beep) — tidak pernah blocking tanpa info ke user. Item gagal sync dicatat ke `failed_log.csv`. |
-| **No Power** | Data kritis (waktu terakhir, boot time, nomor file antrian aktif) disimpan di `RTC_DATA_ATTR`, bertahan lintas deep sleep/reboot ringan. Untuk power loss total, `lastValidTime` di-backup ke NVS. |
-| **No WiFi** | Device tetap standby & bisa menerima tap kartu. Data diarahkan ke jalur offline (SD queue/NVS buffer). Reconnect dicoba tiap 60 detik dengan rotasi 3 SSID, timeout 20 detik per percobaan. |
-| **No Internet** (WiFi connect tapi internet mati) | Dibedakan lewat `pingAPI()` — WiFi bisa connect ke router tapi `isOnline` tetap `false` kalau ping ke backend gagal. Mencegah device salah kira sudah online. |
-| **No Waktu** (RTC invalid/NTP gagal total) | `getTimeWithFallback()` return `false` kalau NTP gagal DAN estimasi boot time sudah kadaluarsa (>12 jam) atau belum pernah sync sama sekali. Presensi ditolak dengan pesan "WAKTU INVALID". |
-| **Task Hang / Blocking Terlalu Lama** | Ditangani via per-task Watchdog Timer — task yang tidak reset WDT dalam batas waktu akan memicu restart otomatis (lihat *Watchdog Management*). |
-| **WiFi Disconnect Berulang meski RSSI Kuat** | Kemungkinan besar bukan masalah sinyal — kandidat utama: brownout akibat lonjakan arus TX (`WIFI_POWER_19_5dBm`) pada catu daya baterai/charger yang tidak sanggup suplai arus puncak, atau perilaku `WIFI_PS_MAX_MODEM` yang membuat AP menganggap klien idle. Lihat *Known Issues*. |
-| **Remote Config Tidak Ter-apply** | Cek: (1) apakah `deviceId` mengandung karakter yang perlu di-encode di URL config, (2) apakah `device_id` yang tersimpan di panel admin **persis sama** dengan yang dipakai device, (3) apakah field yang diuji berada di luar jendela deep sleep device, (4) tunggu penuh interval polling 10 menit sebelum menyimpulkan gagal. |
+| **Signal Leak** | *Weak* (-85 dBm): OTA check, RFID DB check, telemetry, remote config dilewati. *Critical* (-90 dBm): NTP sync dan `pingAPI` dilewati. |
+| **Storage Leak** | `QUEUE_WARN_THRESHOLD` (48.000 file) sebagai peringatan, batas `MAX_QUEUE_FILES` (60.000). Penuh → "QUEUE PENUH!". |
+| **Storage Corrupt** | Record dengan CRC tidak cocok dilewati. File tanpa record valid dihapus (kecuali file tulis aktif). |
+| **Storage Not Detected** | Lihat *Health Check*: terdeteksi lewat pembacaan sektor 0, fallback ke NVS/kirim langsung, pulih otomatis. |
+| **Server Down** | HTTP selain 200 → record tetap di antrean. Retry eksponensial (`SYNC_RETRY_DELAY_MS * 2^attempt`), maksimum 2 retry. |
+| **RFID DB Download Terputus** | Tanpa `END` → `.tmp` dihapus, versi lokal tidak berubah, dicoba lagi pada pengecekan berikutnya (5 menit). DB aktif tidak tersentuh. |
+| **Listrik mati saat ganti DB RFID** | `.bak` dipulihkan saat boot (lihat poin 8). |
+| **Kegagalan umum** | Feedback OLED + buzzer (error 3× beep). Item gagal sync dicatat ke `failed_log.csv`. |
+| **No Power** | Nomor file antrean aktif di RTC dan metadata SD, `lastValidTime` di-backup ke NVS. Jumlah antrean dihitung ulang dari SD saat boot. |
+| **No WiFi** | Device tetap menerima tap, data ke jalur offline. Reconnect tiap 60 detik, rotasi 3 SSID, timeout 20 detik per percobaan. |
+| **No Internet** | `pingAPI()` membedakan WiFi terhubung dari backend terjangkau. |
+| **No Waktu** | `getEpochWithFallback()` gagal jika NTP gagal **dan** estimasi kedaluwarsa (>12 jam) atau belum pernah sync. Presensi ditolak "WAKTU INVALID". Boot mencoba ulang hingga 5 kali (NVS), lalu lanjut offline. |
+| **Task Hang** | Per-task watchdog → restart otomatis. |
+| **WiFi Disconnect Berulang meski RSSI Kuat** | Hipotesis (belum terbukti): brownout saat TX burst, `WIFI_PS_MAX_MODEM`, tumpang tindih `setAutoReconnect`. Baca reason code di serial sebelum mengubah konfigurasi. |
+| **Firmware baru bermasalah** | Jika reset sebelum titik "sehat" di `setup()` dan bootloader mendukung rollback → kembali ke versi lama. |
+| **Remote Config Tidak Ter-apply** | Cek `device_id` persis sama dengan panel admin, field berada di luar jendela sleep, tunggu penuh 10 menit. |
 
 ---
 
@@ -224,100 +268,130 @@ END
 
 | Fitur | Implementasi Kunci |
 |---|---|
-| **Provisioning** | Captive portal AP mode, form lengkap kredensial + jadwal, password AP unik per device dari MAC |
-| **Dim Mode** | OLED mati otomatis di jam tertentu (`dimStartHour`–`dimEndHour`), dicek tiap 60 detik, bisa diubah via remote config |
-| **Sleep Mode** | Deep sleep di luar jam operasional (`sleepStartHour`–`sleepEndHour`), hitung durasi tidur otomatis, flush semua file sebelum tidur |
-| **Retensi Data Expired** | Record offline lebih tua dari `MAX_OFFLINE_AGE` (1 tahun) otomatis di-skip saat sync & dianggap tidak valid |
-| **Animasi & Tampilan OLED** | Startup animation (slide-in text), progress bar (`showProgress`), signal bar indicator |
-| **Suara Buzzer** | 4 pola beda: success (2×), error (3×), notify (1×), startup melody |
-| **Debounce** | 150ms per UID sama (`DEBOUNCE_TIME`), mencegah scan ganda dari 1× tap fisik |
-| **Reset Device** | Tahan tombol BOOT 5 detik → hapus semua NVS + file SD terkait → restart |
-| **Update OTA** | Cek versi via semver compare, download dengan validasi MD5, auto-rollback kalau app tidak di-mark valid |
-| **Heartbeat** | POST tiap 60 detik: uptime, heap, RSSI, jumlah pending, status SD |
-| **Reconnect Internet** | State machine 5 state (IDLE → INIT → TRYING → SUCCESS/FAILED), rotasi SSID otomatis |
-| **Resync Time** | Tiap 30 menit (`TIME_SYNC_INTERVAL`), non-blocking terhadap proses lain |
-| **Remote Config** | Server bisa override jadwal sleep/dim & interval sync/OTA tanpa reflash, disimpan persisten ke NVS. `device_id` di-URL-encode untuk mencegah kegagalan silent akibat nama device dengan spasi. |
-| **Remote Update OTA** | Sama seperti OTA processing, dipicu dari cek berkala bukan manual |
-| **Save to NVS (Fallback)** | Struct `OfflineRecord` disimpan sebagai bytes di NVS, maksimum 40 record, auto-flush ke server begitu online |
-| **Enkripsi Kredensial** | AES-128-CBC, key unik per device diturunkan dari MAC address |
-| **Watchdog Extend/Restore** | Timeout WDT otomatis diperpanjang selama proses berat (sync/OTA), dikembalikan normal setelahnya |
-| **Mode Admin RFID** | UID khusus (maks 5, dari `/admin_rfid.txt`) memicu tampilan status device + sync manual instan, tanpa mencatat presensi |
-| **Download RFID DB Andal (Sentinel `END`)** | Protokol download tidak lagi bergantung pada `Content-Length`/status koneksi (tidak reliable di balik Cloudflare) — pakai baris penutup `END` sebagai penanda selesai yang eksplisit dan pasti |
-| **Dashboard Admin (Filament)** | Panel `Mesin Presensi` menampilkan status live tiap device: online/offline, RSSI berwarna, status SD, antrean pending, **scan hari ini (real dari data presensi, bukan laporan device)**, free heap, uptime, IP terakhir — auto-refresh tiap 30 detik |
+| **Provisioning** | Captive portal AP, password AP acak tampil di OLED, validasi input ketat |
+| **Dim Mode** | OLED mati di jendela dim (`isInWindow`, mendukung lewat tengah malam), cek tiap 60 detik, bisa diubah via remote config |
+| **Sleep Mode** | Deep sleep di jendela sleep, durasi dihitung sesuai jenis jendela (maks 12 jam), RC522 dimatikan |
+| **Retensi Data** | Record offline lebih tua dari 1 tahun dilewati, hanya bila jam valid |
+| **Animasi OLED** | Startup animation, progress bar, indikator sinyal |
+| **Buzzer** | success (2×), error (3×), notify (1×), startup melody |
+| **Debounce** | 150 ms per UID sama |
+| **Reset Device** | Tahan BOOT 5 detik → hapus namespace NVS `cfg` dan `presensi`, kredensial WiFi driver, `rfid_db.txt`, `rfid_db.bak`, `queue_meta.txt`, `failed_log.csv/.old` → restart. **File antrean `queue_N.csv` tidak dihapus.** |
+| **Update OTA** | MD5 wajib, host URL = host API, marker versi, anti-loop, rollback bergantung bootloader |
+| **Heartbeat** | POST tiap 120 detik: firmware, uptime, heap, RSSI, antrean (SD+NVS), scan hari ini, status SD, jumlah RFID DB dan yang terbuang |
+| **Reconnect** | State machine IDLE → INIT → TRYING → SUCCESS/FAILED, rotasi SSID |
+| **Resync Time** | Tiap 30 menit |
+| **Remote Config** | Override jadwal dan interval, field kosong kembali ke default, tulis NVS hanya saat berubah |
+| **Buffer NVS** | Maksimum 40 record, flush otomatis saat online |
+| **Mode Admin RFID** | Status + sync manual lewat `taskSync` |
+| **Download RFID DB** | Sentinel `END`, penggantian file aman dengan `.bak` |
+| **Dashboard Admin (Filament)** | Status live per device, "Scan Hari Ini" dihitung dari data presensi server |
 
 ---
 
-## Data Config yang Harus Disimpan Persisten Saat Provisioning
-Agar tidak ditanyakan ulang setiap boot:
-- Endpoint (API URL)
-- API Key
+## Data Config yang Disimpan Persisten
+- API URL, API Key, nama device
 - Kredensial WiFi (SSID + password, ×3 slot)
+- Jadwal sleep/dim dan interval (dari form atau remote config)
 
 ---
 
 ## Backend: Endpoint API (Laravel)
 
-Semua route berada di bawah prefix `/api/presensi`, dilindungi middleware `api.secret` (header `X-API-KEY` wajib cocok dengan `config('services.api.secret')`).
+Semua route di bawah `/api/presensi`, dilindungi middleware `api.secret` (header `X-API-KEY`).
 
 | Method | Path | Fungsi | Kirim `device_id` via |
 |---|---|---|---|
-| POST | `/` atau `/rfid` | Presensi single (real-time, online) | JSON body |
-| POST | `/validate` | Validasi RFID terdaftar/aktif | — |
-| GET | `/status/{rfid}` | Status presensi hari ini per RFID | — |
-| GET | `/jadwal` | Jadwal presensi hari ini | — |
-| POST | `/sync-bulk` | Upload batch data offline (SD/NVS) | JSON body (per item) |
-| GET | `/health` | Cek status DB & cache server | — |
-| GET | `/ping` | Cek konektivitas dasar | — |
-| GET | `/rfid-list` | Download daftar RFID valid (protokol sentinel `END`) | — |
-| GET | `/rfid-list/version` | Cek versi RFID DB terbaru | — |
-| POST | `/heartbeat` | Telemetry berkala (60 detik) | JSON body |
-| GET | `/config` | **Ambil override remote config** | **Query string** ⚠️ |
-| POST | `/firmware/check` | Cek versi firmware terbaru | JSON body |
-| GET | `/firmware/download/{filename}` | Download file firmware OTA | — |
+| POST | `/` atau `/rfid` | Presensi single (online) | JSON body |
+| POST | `/validate` | Validasi RFID | – |
+| GET | `/status/{rfid}` | Status presensi hari ini | – |
+| GET | `/jadwal` | Jadwal presensi hari ini | – |
+| POST | `/sync-bulk` | Upload batch offline (SD/NVS) | JSON body (per item) |
+| GET | `/health` | Status DB dan cache server | – |
+| GET | `/ping` | Konektivitas dasar | – |
+| GET | `/rfid-list` | Daftar RFID valid (sentinel `END`) | – |
+| GET | `/rfid-list/version` | Versi RFID DB terbaru | – |
+| POST | `/heartbeat` | Telemetry (120 detik) | JSON body |
+| GET | `/config` | Override remote config | **Query string** ⚠️ |
+| POST | `/firmware/check` | Cek versi firmware | JSON body |
+| GET | `/firmware/download/{filename}` | Unduh firmware OTA | – |
 
-> Endpoint `/config` adalah **satu-satunya** yang mengirim `device_id` lewat query string URL, bukan JSON body — sehingga menjadi satu-satunya titik rawan terhadap karakter tidak valid (spasi, dll) di nama device.
+**Kontrak yang diharapkan firmware dari `/firmware/check`:** `{ "update": true, "version": "x.y.z", "url": "https://<host API>/...", "md5": "<32 hex>" }`. `version` harus **persis sama** dengan `FIRMWARE_VERSION` di binary yang diunggah.
+
+**Kontrak `/sync-bulk`:** jumlah elemen `data` pada respons harus sama dengan jumlah yang dikirim, jika tidak firmware menganggap respons tidak valid dan tidak menghapus antrean.
 
 ## Backend: Dashboard Admin (`PresensiDeviceResource`)
 
-Panel Filament `Mesin Presensi` (`app/Filament/Resources/PresensiDeviceResource.php`) menyediakan:
-- **Monitoring real-time**: status online (berdasarkan `last_seen_at` < 10 menit), RSSI dengan indikator warna (hijau ≥ -70 dBm, kuning ≥ -85 dBm, merah di bawahnya), status SD card, antrean pending, RFID DB entries, free heap, uptime, IP terakhir — auto-refresh (`poll`) tiap 30 detik.
-- **Kolom "Scan Hari Ini"**: dihitung **real-time langsung dari tabel `presensi_pegawais`/`presensi_siswas`** (filter `device_id` + `whereDate('tanggal', today)`), **bukan** dari angka yang dilaporkan device sendiri (`scan_today` via heartbeat) — karena angka dari device rentan drift kalau NTP device gagal sync atau device salah tanggal.
-- **Override Remote Config**: form untuk mengisi/mengosongkan jadwal sleep, jadwal dim OLED, interval sync, dan interval cek OTA per device — dikonsumsi device lewat endpoint `/config` (lihat *Poin 16* di atas).
-- **Filter cepat**: device online, antrean menumpuk, SD card bermasalah.
+Panel Filament `Mesin Presensi` (`app/Filament/Resources/PresensiDeviceResource.php`):
+- **Monitoring**: online (berdasarkan `last_seen_at` < 10 menit; dengan heartbeat 120 detik ini memberi toleransi 5 siklus), RSSI berwarna, status SD, antrean pending, RFID DB entries, free heap, uptime, IP terakhir. Poll 30 detik.
+- **Scan Hari Ini**: dihitung dari tabel `presensi_pegawais`/`presensi_siswas` (filter `device_id` + tanggal), bukan angka laporan device.
+- **Override Remote Config**: sleep, dim OLED, interval sync dan OTA per device. Mengosongkan field mengembalikan default firmware.
+- **Filter cepat**: device online, antrean menumpuk, SD bermasalah.
 
-### Prasyarat Data — Kolom `device_id` di Tabel Presensi
-Agar kolom "Scan Hari Ini" dan fitur analitik per-device lain berfungsi akurat, `PresensiService::prosesPresensi()` **wajib** menyimpan parameter `$deviceId` yang diterimanya ke kolom `device_id` pada tabel `presensi_pegawais`/`presensi_siswas` saat `create()` (presensi masuk). Kegagalan meneruskan `device_id` ke closure `DB::transaction()` (lupa menambahkannya ke daftar `use`) menyebabkan seluruh record presensi tersimpan dengan `device_id = NULL`, sehingga statistik per-device (termasuk dashboard admin) tidak akan pernah menunjukkan data yang benar meski presensi berhasil tersinkron.
+### Prasyarat Data
+`PresensiService::prosesPresensi()` wajib menyimpan `$deviceId` ke kolom `device_id` saat `create()`. Lupa menambahkannya ke `use` closure `DB::transaction()` membuat semua record ber-`device_id = NULL`.
+
+---
+
+## Rilis Firmware (OTA)
+
+1. Naikkan `FIRMWARE_VERSION` dan komentar header di `attendance-machine.ino`.
+2. Compile:
+   ```bash
+   arduino-cli compile --clean --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs --export-binaries .
+   ```
+3. Pastikan marker versi ada di binary:
+   ```bash
+   strings build/esp32.esp32.esp32c3/attendance-machine.ino.bin | grep FWVER:
+   ```
+   Harus menampilkan `FWVER:<versi baru>;`. Baris `FWVER:` saja berasal dari kode pemindai, bukan marker.
+4. Hitung MD5 dari file **yang sama**:
+   ```bash
+   md5sum build/esp32.esp32.esp32c3/attendance-machine.ino.bin
+   ```
+5. Unggah `.ino.bin` ke server. Isi versi persis `x.y.z` (tanpa `v` atau spasi) dan MD5.
+6. Pantau serial: `[OTA] update=1 ver=...`, lalu setelah restart `[FW] FWVER:<versi>;`.
+
+Pesan kegagalan OTA di OLED:
+
+| Pesan | Arti |
+|---|---|
+| MD5 TIDAK ADA | Server tidak mengirim MD5 valid |
+| VERSI TAK ADA | Marker tidak ditemukan di image |
+| VERSI BEDA | Marker image berbeda dari versi server |
+| MD5 SALAH | MD5 tidak cocok dengan image |
+| UNDUH TERPUTUS | Koneksi putus atau stall > 30 detik |
+| NO SPACE | Partisi OTA tidak cukup |
 
 ---
 
 ## Known Issues & Troubleshooting
 
-### WiFi disconnect berulang meski RSSI kuat (mis. -30 dBm)
-Bukan masalah sinyal. Kandidat penyebab, urut dari yang paling mungkin:
-1. **Brownout saat TX burst** — `WIFI_POWER_19_5dBm` (TX power maksimum) bisa menarik arus puncak 300–500mA sesaat; kalau suplai baterai/charger 4056 tidak sanggup, tegangan drop sesaat memicu reset radio.
-2. **`WIFI_PS_MAX_MODEM`** — mode power-save agresif, dikenal bermasalah di sejumlah kombinasi ESP32-C3 + AP tertentu; radio bisa terlambat merespons beacon sehingga AP memutus koneksi dari sisinya sendiri.
-3. **`setAutoReconnect(true)` tumpang tindih** dengan state machine reconnect manual (`processReconnect`), berpotensi saling mengganggu proses `WiFi.begin()`/`WiFi.disconnect()`.
+### Unduhan RFID DB gagal terus ("UNDUH TERPUTUS")
+Pastikan `/rfid-list` selalu mengirim `END` di akhir. Cloudflare membuang `Content-Length` dan `Connection`, jadi firmware bergantung pada sentinel.
 
-Diagnosis paling akurat: pasang `WiFi.onEvent()` untuk log disconnect reason code, lalu uji satu variabel per waktu (`WiFi.setSleep(WIFI_PS_NONE)` dulu, baru TX power, baru auto-reconnect).
+### Remote config tidak ter-apply
+1. Cek data di database (`php artisan tinker`).
+2. Cek `device_id` yang dipakai device sama persis dengan panel admin.
+3. Cek field yang diuji berada di luar jendela sleep.
+4. Tunggu penuh 10 menit sejak fetch terakhir.
+5. Periksa serial untuk log `[CFG]`.
 
-### Download RFID DB gagal terus ("UNDUH TERPUTUS")
-Root cause: **Cloudflare men-strip header `Content-Length` dan `Connection`** dari response, sehingga firmware tidak bisa mengandalkan keduanya untuk mendeteksi selesai-tidaknya download. Solusi permanen: protokol sentinel `END` (lihat *Poin 8*) — pastikan endpoint `/rfid-list` di backend selalu mengirim baris `END` di akhir response.
+### "Scan Hari Ini" selalu 0
+Cek kolom `device_id` pada record presensi. Jika `null`, lihat *Prasyarat Data*.
 
-### Remote config tidak ter-apply ke device
-Urutan diagnosis:
-1. Cek data tersimpan benar di database (`php artisan tinker`).
-2. Cek `device_id` yang **benar-benar dipakai device** cocok persis dengan yang ada di panel admin (perhatikan spasi/karakter tersembunyi).
-3. Cek apakah field yang diuji berada di luar jendela deep sleep device saat ini.
-4. Pastikan sudah menunggu penuh 10 menit sejak boot/fetch terakhir.
-5. Kalau semua di atas sudah benar tapi tetap gagal, kemungkinan besar isu **URL encoding** — pastikan firmware sudah memakai `urlEncode()` sebelum menyisipkan `deviceId` ke query string `/config`.
+### OTA tidak jalan
+Lihat tabel pesan di *Rilis Firmware*. Penyebab tersering: `FIRMWARE_VERSION` belum dinaikkan sebelum build, atau versi di server berbeda dari marker di binary.
 
-### Statistik "Scan Hari Ini" di dashboard selalu 0 padahal presensi sukses
-Cek kolom `device_id` di record presensi terkait (`php artisan tinker`) — kalau `null`, kemungkinan besar `PresensiService::prosesPresensi()` menerima parameter `$deviceId` tapi tidak meneruskannya ke `create()`/`update()` (lupa ditambahkan ke `use` closure `DB::transaction()` dan ke array data yang disimpan).
+### Item yang belum diverifikasi di perangkat
+- Rollback OTA (butuh bootloader yang mendukung, uji dengan image yang sengaja gagal di RC522).
+- Perilaku `useHTTP10(true)` di balik Cloudflare untuk unduhan DB RFID (OTA sudah terbukti berhasil).
+- Handshake HTTPS saat jam belum valid.
+- WDT saat sync backlog besar di `setup()`.
 
 ---
 
 ## Referensi
-- **Non-blocking state machine (tick-based FSM)** — pola untuk `ReconnectState` & `SyncState`, dieksekusi per-tick tanpa `delay()` blocking.
-- **AES-128-CBC + SHA-256 key derivation (mbedtls)** — untuk enkripsi kredensial sebelum disimpan ke NVS.
-- **FreeRTOS Task + Queue + Mutex** — arsitektur dasar concurrency multi-task pada firmware ini.
-- **Sentinel-based stream termination** — pola pengganti `Content-Length`/connection-close detection untuk transfer data di balik reverse proxy (Cloudflare) yang tidak meneruskan header transport-level secara konsisten.
+- **Non-blocking state machine (tick-based FSM)**: pola `ReconnectState` dan `SyncState`.
+- **AES-128-CBC + SHA-256 key derivation (mbedtls)**: enkripsi kredensial.
+- **FreeRTOS Task + Queue + Mutex**: arsitektur concurrency.
+- **Sentinel-based stream termination**: pengganti deteksi `Content-Length`/connection-close di balik reverse proxy.

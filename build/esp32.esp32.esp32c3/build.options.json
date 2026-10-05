@@ -1,9 +1,0 @@
-{
-  "additionalFiles": "../..,../..,../..,../..",
-  "compiler.optimization_flags": "-Os",
-  "customBuildProperties": "",
-  "fqbn": "esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs",
-  "hardwareFolders": "/home/zulfikriyahya/.arduino15/packages/esp32/hardware/esp32/3.3.12,/home/zulfikriyahya/.arduino15/packages/esp32/hardware/esp32/3.3.12",
-  "otherLibrariesFolders": "/home/zulfikriyahya/Arduino/libraries",
-  "sketchLocation": "/home/zulfikriyahya/Dev/IOT/attendance-machine"
-}

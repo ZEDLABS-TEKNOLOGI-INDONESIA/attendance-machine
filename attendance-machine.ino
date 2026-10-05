@@ -387,6 +387,7 @@ struct WifiCredential
 static WifiCredential wifiCreds[3];
 static char apiKey[48] = "";
 static char apiBaseUrl[80] = "https://presensi.zedlabs.id";
+static void urlEncode(const char *src, char *dst, size_t dstSize);
 static void loadCredentials()
 {
   loadEncryptedNvs(NVS_NS_CONFIG, NVS_KEY_SSID1, wifiCreds[0].ssid, sizeof(wifiCreds[0].ssid));
@@ -1981,38 +1982,46 @@ void fetchRemoteConfig()
   {
     return;
   }
+  auto clampHour = [](int h, int def)
+  {
+    return (h >= 0 && h <= 23) ? h : def;
+  };
+  auto clampInterval = [](unsigned long v, unsigned long def)
+  {
+    return (v >= 5000UL) ? v : def;
+  };
   bool changed = false;
   RuntimeConfig snapshot{};
   if (xConfigMutex && xSemaphoreTake(xConfigMutex, pdMS_TO_TICKS(500)) == pdTRUE)
   {
     if (doc.containsKey("sleep_start"))
     {
-      rtCfg.sleepStartHour = doc["sleep_start"];
+      rtCfg.sleepStartHour = clampHour(doc["sleep_start"] | rtCfg.sleepStartHour, rtCfg.sleepStartHour);
       changed = true;
     }
     if (doc.containsKey("sleep_end"))
     {
-      rtCfg.sleepEndHour = doc["sleep_end"];
+      rtCfg.sleepEndHour = clampHour(doc["sleep_end"] | rtCfg.sleepEndHour, rtCfg.sleepEndHour);
       changed = true;
     }
     if (doc.containsKey("oled_dim_start"))
     {
-      rtCfg.dimStartHour = doc["oled_dim_start"];
+      rtCfg.dimStartHour = clampHour(doc["oled_dim_start"] | rtCfg.dimStartHour, rtCfg.dimStartHour);
       changed = true;
     }
     if (doc.containsKey("oled_dim_end"))
     {
-      rtCfg.dimEndHour = doc["oled_dim_end"];
+      rtCfg.dimEndHour = clampHour(doc["oled_dim_end"] | rtCfg.dimEndHour, rtCfg.dimEndHour);
       changed = true;
     }
     if (doc.containsKey("sync_interval_ms"))
     {
-      rtCfg.syncIntervalMs = doc["sync_interval_ms"];
+      rtCfg.syncIntervalMs = clampInterval(doc["sync_interval_ms"] | rtCfg.syncIntervalMs, rtCfg.syncIntervalMs);
       changed = true;
     }
     if (doc.containsKey("ota_check_interval_ms"))
     {
-      rtCfg.otaCheckIntervalMs = doc["ota_check_interval_ms"];
+      rtCfg.otaCheckIntervalMs = clampInterval(doc["ota_check_interval_ms"] | rtCfg.otaCheckIntervalMs, rtCfg.otaCheckIntervalMs);
       changed = true;
     }
     snapshot = rtCfg;

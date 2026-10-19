@@ -10,16 +10,18 @@ Firmware untuk ESP32-C3 Super Mini, versi saat ini v2.3.6.
 
 ## Build & upload
 - Library:
-- MFRC522 1.4.12
-- Adafruit SSD1306 2.5.17
-- Adafruit GFX Library 1.12.6
-- Adafruit BusIO 1.17.4
-- ArduinoJson 7.4.3 (API v7: `JsonDocument`, `to<JsonArray>()`)
-- SdFat 2.3.0
+  - MFRC522 1.4.12
+  - Adafruit SSD1306 2.5.17
+  - Adafruit GFX Library 1.12.6
+  - Adafruit BusIO 1.17.4
+  - ArduinoJson 7.4.3 (API v7: `JsonDocument`, `to<JsonArray>()`)
+  - SdFat 2.3.0
 - Board package: esp32 by Espressif 3.3.12
 - Partition scheme: Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS), yaitu `PartitionScheme=min_spiffs`
 - Compile: `arduino-cli compile --clean --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs --export-binaries .`
+- Wipe flash (opsional, untuk bersihkan NVS/SPIFFS/data lama): `esptool --chip esp32c3 --port /dev/ttyACM0 erase-flash`
 - Upload (USB): `arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs .`
+- Wipe + upload (satu perintah): `esptool --chip esp32c3 --port /dev/ttyACM0 erase-flash && arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs .`
 - Cek marker versi: `strings build/esp32.esp32.esp32c3/attendance-machine.ino.bin | grep FWVER:` (harus ada `FWVER:<versi>;`)
 - Cek MD5: `md5sum build/esp32.esp32.esp32c3/attendance-machine.ino.bin`
 - Warning dari library SdFat/FS.h (`FILE_READ`, `FILE_WRITE`, `__has_include(FS.h)`) aman diabaikan.

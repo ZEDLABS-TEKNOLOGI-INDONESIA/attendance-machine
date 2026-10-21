@@ -82,7 +82,7 @@ Dasar: `attendance-machine.ino` v2.3.6 (branch `hardening-2.3.6`), `README.md`, 
 | 42 | DB kosong dianggap gagal | Daftar kosong yang sah (ada `END`) diterima |
 | 43-44 | README tidak sinkron | README dan requirements ditulis ulang |
 | 45-49 | Teratasi sebelumnya | Sleep non-wrap, DB tanpa `END`, log gagal, busy-spin `loop()`, shadowing |
-| 50 | Jam setelah cold boot mengabaikan lama mati | RTC opsional (S1307, sudah ada) + `isTimeTrusted()`: scan dan sleep ditahan sampai NTP/RTC, retry NTP tiap 60 dtk, OLED `--:--`. Saklar `REJECT_SCAN_UNTRUSTED_TIME` |
+| 50 | Jam setelah cold boot mengabaikan lama mati | RTC opsional (DS1307, sudah ada) + `isTimeTrusted()`: scan dan sleep ditahan sampai NTP/RTC, retry NTP tiap 60 dtk, OLED `--:--`. Saklar `REJECT_SCAN_UNTRUSTED_TIME` |
 | 53 | Factory reset tidak menghapus `queue_N.csv` | Tahan BOOT 5 dtk = reset biasa, 10 dtk = reset + hapus antrean. Reset berjalan setelah tombol dilepas |
 | 54 | Rollback OTA tidak pernah aktif | `verifyRollbackLater()` return true, penandaan manual setelah RC522 OK |
 | 55 | Tap admin tidak langsung sync | `forceSyncRequested` dikonsumsi `taskSync` |

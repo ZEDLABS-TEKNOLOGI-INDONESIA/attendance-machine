@@ -1,2 +1,7 @@
 build/
-release/
+release/*
+!release/NOTES.md
+!release/SHA256SUMS
+!release/*.bin
+!release/*.bin.md5
+release/*.merged.bin

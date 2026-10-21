@@ -145,6 +145,8 @@
 #define UNTRUSTED_TIME_RETRY_INTERVAL 60000UL
 #define CRED_DATA_MAX 96 // kelipatan 16
 #define CRED_PLAIN_MAX (CRED_DATA_MAX - 1)
+// Kosong = wajib diisi lewat provisioning. Jangan isi domain satu sekolah di firmware generik.
+#define DEFAULT_API_URL ""
 // Penanda versi di dalam image, dibaca saat OTA untuk mencocokkan versi yang ditawarkan server.
 // `retain` mencegah linker membuang variabel ini (gc-sections). Referensi runtime di setup()
 // menjadi pengaman kedua, karena pada toolchain tertentu `retain` diabaikan.
@@ -490,7 +492,7 @@ struct WifiCredential
 };
 static WifiCredential wifiCreds[3];
 static char apiKey[CRED_DATA_MAX] = "";
-static char apiBaseUrl[80] = "https://presensi.mtsn1pandeglang.sch.id";
+static char apiBaseUrl[80] = DEFAULT_API_URL;
 #define API_URL_BUF 160
 // Gabung base URL + path dengan batas aman. false jika terpotong.
 static bool buildApiUrl(char *out, size_t outSz, const char *path)
@@ -4181,7 +4183,7 @@ static String provHtmlPage()
             "</div></div>"
             "<div class='section'><div class='section-label'>Konfigurasi Perangkat</div>"
             "<div class='field'><label>API URL Backend</label>"
-            "<input name='apiurl' placeholder='https://domain.sch.id' value='https://presensi.mtsn1pandeglang.sch.id' required></div>"
+            "<input name='apiurl' placeholder='https://domain.sch.id' value='" DEFAULT_API_URL "' required></div>"
             "<div class='hint'>Tanpa trailing slash. Contoh: https://presensi.sekolah.sch.id</div>"
             "<div class='field' style='margin-top:10px'><label>API Key</label>"
             "<input name='apikey' placeholder='Masukkan API Key' required></div>"
@@ -4625,7 +4627,7 @@ void setup()
     return;
   }
   loadCredentials();
-  if (strlen(apiKey) == 0 || strlen(wifiCreds[0].ssid) == 0)
+  if (strlen(apiKey) == 0 || strlen(wifiCreds[0].ssid) == 0 || strlen(apiBaseUrl) == 0)
   {
     showOLED(F("CONFIG ERROR"), "MASUK SETUP MODE");
     delay(2000);

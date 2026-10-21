@@ -5,3 +5,6 @@ release/*
 !release/*.bin
 !release/*.bin.md5
 release/*.merged.bin
+queue_*.csv
+build.log
+build/

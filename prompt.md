@@ -34,34 +34,37 @@ CARA KERJA
 - Bila informasi kurang (kontrak server, perilaku hardware), tanyakan atau tandai ASUMSI. Jangan menebak.
 - Nomor baris di bawah mengacu ke file saat ini dan akan bergeser setelah perubahan. Cari berdasarkan nama fungsi.
 
-TAHAP 0 - KEBERSIHAN REPO (tanpa mengubah logika firmware)
+<!-- TAHAP 0 - KEBERSIHAN REPO (tanpa mengubah logika firmware)
 Kondisi git: M attendance-machine.ino, M issue.md, D certs/mtsn1_gtsr4.pem, D certs/mtsn_1isrgx1.pem, ?? certs/gtsr4.pem, ?? certs/isrgx1.pem, ?? promting.md.
-<!-- 0.1 Diff .ino hanya mengganti default apiBaseUrl (L493) ke mtsdarulhudapusat, tetapi form provisioning (L4184) masih default mtsn1pandeglang. Firmware generik tidak boleh membawa domain satu sekolah. Usulkan satu konstanta DEFAULT_API_URL yang dipakai kedua tempat (atau kosong, wajib diisi), lalu minta keputusanku. -->
+0.1 Diff .ino hanya mengganti default apiBaseUrl (L493) ke mtsdarulhudapusat, tetapi form provisioning (L4184) masih default mtsn1pandeglang. Firmware generik tidak boleh membawa domain satu sekolah. Usulkan satu konstanta DEFAULT_API_URL yang dipakai kedua tempat (atau kosong, wajib diisi), lalu minta keputusanku.
 0.2 Rename sertifikat adalah perubahan sah. Beri perintah untuk memastikan isi certs/gtsr4.pem dan certs/isrgx1.pem identik dengan blok TLS_ROOT_CA di .ino (satu skrip verifikasi sederhana). Beri cek kedaluwarsa via openssl.
-<!-- 0.3 issue.md baris 50 punya typo "S1307" (harusnya DS1307). promting.md salah ketik dan tidak terpakai: tanya apakah dihapus. -->
-<!-- 0.4 release/ ada di .gitignore, jadi binary tidak ter-track. Jelaskan opsi: (a) tetap diabaikan dan binary jadi GitHub Release asset, (b) un-ignore hanya release/*.bin dan SHA256SUMS. Minta keputusanku. -->
+0.3 issue.md baris 50 punya typo "S1307" (harusnya DS1307). promting.md salah ketik dan tidak terpakai: tanya apakah dihapus.
+0.4 release/ ada di .gitignore, jadi binary tidak ter-track. Jelaskan opsi: (a) tetap diabaikan dan binary jadi GitHub Release asset, (b) un-ignore hanya release/*.bin dan SHA256SUMS. Minta keputusanku.
 0.5 Tag v2.3.6 dan dua commit "Release v2.3.6" ganda. Beri saran tag yang bersih tanpa menulis ulang history publik.
 0.6 Pemindaian secret: git log -S"password" hanya mencocokkan kata. Beri perintah gitleaks/trufflehog atas seluruh history (--all) dan cara membaca hasilnya. Jika API key pernah bocor, rekomendasikan rotasi, bukan sekadar hapus.
-Keluaran: daftar perintah git yang aman + pesan commit Conventional Commits.
+Keluaran: daftar perintah git yang aman + pesan commit Conventional Commits. -->
+Tahap 0 selesai
 
-TAHAP 1 - INTEGRITAS DATA ABSENSI (prioritas tertinggi)
+<!-- TAHAP 1 - INTEGRITAS DATA ABSENSI (prioritas tertinggi)
 1.1 [HIGH] Baris parsial setelah listrik mati. saveToQueue (L2132) menulis dengan O_APPEND. Jika daya putus di tengah baris sebelum sync, record BERIKUTNYA menempel di baris yang sama, CRC gagal, dan record sah ikut hilang. Perbaiki: sebelum append, periksa byte terakhir file. Bila bukan '\n', tulis '\n' dulu. Terapkan juga pada appendFailedLogToSD. Pertahankan format CSV lama.
 1.2 [HIGH] Record dibuang diam-diam. readQueueFileLocked (L3124) melewati record ber-CRC salah / malformed tanpa jejak. syncQueueFile (L3249-3257) lalu sd.remove(fn) bila validCnt==0 atau setelah sukses menghapus seluruh file, termasuk baris yang dilewati. Perbaiki: hitung record yang dilewati dan pindahkan baris tersebut ke /quarantine.csv (atau failed_log) SEBELUM file dihapus. Pisahkan alasan: kedaluwarsa (sah dibuang, dicatat), CRC salah, malformed. Catatan: rfidTmp (L3159) tidak diinisialisasi penuh bila rl<10, jadi CRC dihitung dari byte sampah. Inisialisasi nol.
 1.3 [HIGH, butuh keputusan kontrak server] Idempotensi. Payload sync-bulk (L3278-3283) tidak punya event id. Bila respons hilang setelah server menyimpan, file dikirim ulang dan duplikat bergantung pada dedup server. Usulkan event_id deterministik (mis. deviceId + unix_time + rfid) di firmware, dan tanyakan apakah backend bisa dedup. Jika perlu kolom CSV baru, rancang kompatibilitas: parser tetap membaca format 5 kolom lama, dan versi naik ke 2.4.0. JANGAN ubah kontrak sebelum aku setuju.
 1.4 [HIGH, butuh keputusan kontrak server] Status per item "error" (L3305-3314, L2324-2332) hanya dicatat ke failed_log lalu file dihapus. Error transien dari server (mis. 5xx per item, lock DB) hilang permanen. Tanyakan status mana yang final (duplikat/ditolak) dan mana yang boleh diulang, lalu usulkan penanganannya (record transien dipertahankan untuk siklus berikutnya).
 1.5 [MEDIUM] nvsSyncToServer (L2261): sentCnt bisa < cnt bila nvsLoadRecord gagal, tetapi nvsCompactAfterSync(cnt) memangkas cnt record. Samakan. nvsCompactAfterSync (L2224) tidak atomik terhadap power loss: analisis dampaknya (duplikat vs hilang) dan tetapkan urutan tulis yang paling aman.
 1.6 [MEDIUM] Keausan flash NVS. Tiap scan sukses menulis NVS 2-3 kali (nvsBumpScanCount, nvsSaveLastScan). Hitung perkiraan siklus erase per tahun pada partisi NVS 20KB untuk 500 dan 2000 scan per hari, dan usulkan batching bila perlu. Cek juga apakah NVS 20KB cukup untuk 9 blob kredensial + 40 rec_N + data Wi-Fi: tambahkan log nvs_get_stats saat boot.
-1.7 [MEDIUM] SD tanpa proteksi power-loss. Jelaskan perilaku bila sd.begin gagal karena FS korup. Jangan pernah format otomatis. Tampilkan pesan jelas dan lanjutkan jalur NVS. Dokumentasikan syarat FAT32/exFAT (batas root FAT16 512 entri, 60000 file antrean).
+1.7 [MEDIUM] SD tanpa proteksi power-loss. Jelaskan perilaku bila sd.begin gagal karena FS korup. Jangan pernah format otomatis. Tampilkan pesan jelas dan lanjutkan jalur NVS. Dokumentasikan syarat FAT32/exFAT (batas root FAT16 512 entri, 60000 file antrean). -->
+Tahap 1 selesai
 
-TAHAP 2 - WAKTU DAN TLS
+<!-- TAHAP 2 - WAKTU DAN TLS
 2.1 [HIGH] syncTimeWithFallback (L1536-1572): getLocalTime(&ti,0) mengembalikan true segera jika jam sistem sudah valid (dari RTC eksternal atau sisa sebelum ESP.restart), sehingga "NTP berhasil" bisa positif palsu tanpa SNTP benar-benar sinkron. Efeknya: RTC tidak dikoreksi, uji item 52 menyesatkan. Perbaiki dengan status SNTP nyata (sntp_get_sync_status / callback sync), pertahankan pola non-blocking dan timeout per server.
 2.2 [HIGH, butuh keputusan] Cakupan root CA hanya GTS R4 + ISRG X1 (L610-655). Cloudflare dapat menerbitkan lewat CA lain. Jika berganti, seluruh HTTPS termasuk OTA gagal tanpa jalur pemulihan jarak jauh. Evaluasi fallback ke certificate bundle bawaan (sdkconfig sudah CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y) HANYA saat verifikasi root gagal, bukan setInsecure. Hitung dampak flash. Dokumentasikan masa berlaku (ISRG X1 2035, GTS R4 2036).
 2.3 [MEDIUM] RTC_DATA_ATTR bootTime (L158) menyimpan millis() boot sebelumnya, tetapi millis() mulai dari 0 setelah ESP.restart/deep sleep. getEpochWithFallback (L1484) menghitung (millis()-bootTime) yang bisa underflow. Setelah deep sleep, lastValidTime hanya ditambah sleepDurationSeconds (L4598-4605) dan tidak menghitung lama bangun sebelum tidur, sehingga nilai yang disimpan ke NVS bisa meleset berjam-jam. Rumuskan skenario, buktikan, perbaiki. Hubungkan dengan item 64 (apakah jam sistem selamat dari restart/deep sleep) dan beri prosedur uji.
 2.4 [MEDIUM] Pastikan configTime(GMT_OFFSET_SEC,...) tidak menimpa TZ "WIB-7" yang diset di setup(), dan mktime(&ti) di L1555 konsisten dengan TZ aktif. Beri uji: bandingkan jam OLED dengan jam asli dan epoch.
 2.5 [MEDIUM] isOnline (L3588-3591) diset true begitu WiFi tersambung, padahal server belum tentu terjangkau (captive portal / internet mati). Pisahkan wifiConnected dari serverReachable (turunkan dari hasil heartbeat/ping terakhir), tanpa mengubah jalur data presensi.
-2.6 [LOW] Angka ajaib 1577836800 (L1459, L1477, L1521) jadi satu konstanta bernama. Samakan dengan RTC_MIN_VALID_YEAR.
+2.6 [LOW] Angka ajaib 1577836800 (L1459, L1477, L1521) jadi satu konstanta bernama. Samakan dengan RTC_MIN_VALID_YEAR. -->
+Tahap 2 selesai
 
-TAHAP 3 - STABILITAS RUNTIME
+<!-- TAHAP 3 - STABILITAS RUNTIME
 3.1 [HIGH] extendWdtForSync/restoreWdtNormal (L699-772) melakukan delete tiap task, deinit, init, add dari task yang berbeda, tanpa memeriksa return value. Jika deinit/init gagal, timeout tidak berubah secara diam-diam, dan ada jendela tanpa pengawasan. Ganti dengan esp_task_wdt_reconfigure() (tersedia di IDF core 3.3.x) dan periksa hasilnya. Hapus WDT_TIMEOUT_SEC yang tidak terpakai (L72). Hubungkan dengan item 28.
 3.2 [HIGH] Observabilitas: log esp_reset_reason() tiap boot, simpan penghitung reboot dan alasan terakhir (tulis hanya bila berubah), kirim di heartbeat bersama min free heap (esp_get_minimum_free_heap_size), max alloc block, dan stack high-water-mark tiap task. Periksa apakah core dump aktif (partisi coredump ada), dan beri cara membacanya. Tanpa data ini soak test tidak bisa dinilai. Perubahan field heartbeat harus kompatibel dengan backend (field tambahan saja).
 3.3 [MEDIUM] Perlindungan boot-loop. Kegagalan RC522 (L4695-4701) memicu ESP.restart() tanpa batas. Rantai OTA, rollback, lalu OTA lagi (otaRejectedVer hilang setelah reboot) juga bisa berputar. Rancang batas percobaan berbasis penghitung NVS dengan jeda makin panjang (mis. deep sleep singkat) dan layar error tetap tampil. Jangan membuat perangkat tidak bisa di-OTA.
@@ -70,13 +73,15 @@ TAHAP 3 - STABILITAS RUNTIME
 3.6 [MEDIUM, verifikasi] Dengan CDCOnBoot=cdc dan perangkat dicatu tanpa host USB, uji apakah Serial.printf memblokir task (HWCDC TX timeout). Beri makro log berlevel (LOG_E/W/I/D) yang bisa dimatikan di rilis tanpa bocor secret, dan ukur dampaknya.
 3.7 [MEDIUM] Pemakaian String Arduino di jalur berulang (nvsIsRecentScan L1121, payload JSON, getString). Ganti yang murah (buffer statis/snprintf) dan ukur heap sebelum dan sesudah. Jangan ubah provHtmlPage (jarang dipakai).
 3.8 [LOW] Deep sleep: durasi dihitung dari `ti` lama sehingga ada selisih sekitar 8 detik (tunggu task + delay). Hitung ulang tepat sebelum tidur. Pertimbangkan gpio_hold pada CS SD dan SS RFID agar tidak mengambang saat tidur (dampak arus baterai). Tandai TIDAK TERUJI bila tanpa alat ukur.
-3.9 [LOW, verifikasi] pollRfidReader memakai acquireSD(30ms): saat chunkedSync/pemindaian antrean menahan mutex lama, tap bisa terlewat. Ukur dan tentukan apakah perlu diubah.
+3.9 [LOW, verifikasi] pollRfidReader memakai acquireSD(30ms): saat chunkedSync/pemindaian antrean menahan mutex lama, tap bisa terlewat. Ukur dan tentukan apakah perlu diubah. -->
+Tahap 3 selesai
 
-TAHAP 4 - KEAMANAN DAN OPERASIONAL
+<!-- TAHAP 4 - KEAMANAN DAN OPERASIONAL
 4.1 Provisioning hanya aktif saat belum diprovisioning atau kredensial kosong (L4619-4634). Bila SSID/password berubah di lokasi, satu-satunya jalan adalah factory reset yang menghapus data. Usulkan jalur "masuk provisioning tanpa wipe" (mis. tahan BOOT 3 detik, atau otomatis setelah N jam offline). Ini fitur baru: ajukan dulu, minta persetujuanku.
 4.2 Nilai ulang: enkripsi kredensial (known limitation 31), flash encryption/NVS encryption/secure boot. Jelaskan trade-off dan sifat irreversible. JANGAN aktifkan tanpa persetujuan.
 4.3 Rate limit /save pada AP provisioning (jendela 5 menit, password AP acak): nilai apakah cukup.
-4.4 Remote config: tambahkan batas atas interval (jsonIntervalOrDefault hanya punya batas bawah 5000 ms).
+4.4 Remote config: tambahkan batas atas interval (jsonIntervalOrDefault hanya punya batas bawah 5000 ms). -->
+Tahap 4 selesai
 
 TAHAP 5 - BUILD, UJI, RILIS
 5.1 Build bersih dengan: arduino-cli compile --warnings all ... Laporkan warning milik kode kita (abaikan warning SdFat/FS.h yang sudah dikenal). Laporkan ukuran sketch dan RAM global dibanding v2.3.6 (1.332.096 byte).

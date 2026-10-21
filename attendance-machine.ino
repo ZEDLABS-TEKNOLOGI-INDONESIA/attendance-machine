@@ -1,13 +1,13 @@
 /*
  * ATTENDANCE MACHINE
  * Device           : ESP32-C3 Super Mini
- * Tools            : Arduino IDE 2.3.6
+ * Tools            : Arduino IDE 2.3.7
  * Environtment     : v3.3.12
  * Schema Partition : Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)
  * Author           : Yahya Zulfikri
  * Created          : Juli 2025
  * Updated          : Agustus 2026
- * Version          : 2.3.6
+ * Version          : 2.3.7
  */
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -35,6 +35,13 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
+#include <nvs_flash.h>
+#include <esp_sntp.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <driver/gpio.h>
+#include "pure_logic.h"
+
 #define PIN_SPI_SCK 4
 #define PIN_SPI_MOSI 6
 #define PIN_SPI_MISO 5
@@ -49,7 +56,7 @@
 #define SCREEN_HEIGHT 64
 #define DEBOUNCE_TIME 150UL
 #define SYNC_INTERVAL 300000UL
-#define MAX_OFFLINE_AGE 31536000UL
+#define MAX_OFFLINE_AGE 2592000UL // 30 hari = MAX_DATA_AGE di server (PresensiController)
 #define MIN_REPEAT_INTERVAL 1800UL
 #define TIME_SYNC_INTERVAL 1800000UL
 #define RECONNECT_INTERVAL 60000UL
@@ -61,20 +68,19 @@
 #define SD_REDETECT_INTERVAL 30000UL
 #define MAX_TIME_ESTIMATE_AGE 43200UL
 #define OTA_CHECK_INTERVAL 600000UL
+#define CFG_INTERVAL_MIN_MS 5000UL
+#define CFG_INTERVAL_MAX_MS 86400000UL // 24 jam; jauh di bawah wrap millis (±49 hari)
 #define RFID_DB_CHECK_INTERVAL 300000UL
 #define TELEMETRY_INTERVAL 120000UL
 #define REMOTE_CONFIG_INTERVAL 600000UL
-#define BACKOFF_MAX_SHIFT 4               // maksimal 2^4 = 16x interval dasar
-#define BACKOFF_MAX_INTERVAL_MS 3600000UL // batas atas 1 jam (kecuali interval dasar lebih besar)
 #define FACTORY_RESET_HOLD_MS 5000UL
 #define FACTORY_RESET_WIPE_QUEUE_MS 10000UL // tahan selama ini = reset + hapus antrean SD
 #define PROVISIONING_TIMEOUT_MS 300000UL
-#define WDT_TIMEOUT_SEC 60
+
 #define WDT_SYNC_TIMEOUT_MS 180000UL
 #define WDT_NORMAL_TIMEOUT_MS 90000UL
 #define SD_MUTEX_TIMEOUT_MS 5000UL
 #define MAX_RECORDS_PER_FILE 25
-#define MAX_QUEUE_FILES 60000
 #define MAX_DUPLICATE_CHECK_FILES 3
 #define MAX_DUPLICATE_CHECK_LINES (MAX_RECORDS_PER_FILE + 1)
 #define QUEUE_WARN_THRESHOLD 48000
@@ -120,13 +126,12 @@
 #define SLEEP_END_HOUR_DEFAULT 1
 #define OLED_DIM_START_HOUR_DEFAULT 8
 #define OLED_DIM_END_HOUR_DEFAULT 10
-#define GMT_OFFSET_SEC 25200L
+
 #define SIGNAL_THRESHOLD_WEAK -85
 #define SIGNAL_THRESHOLD_CRITICAL -90
-#define FIRMWARE_VERSION "2.3.6"
+#define FIRMWARE_VERSION "2.3.7"
 #define PROV_AP_SSID "ATTENDANCE MACHINE"
 #define PROV_DNS_PORT 53
-#define CRC8_POLY 0x07
 #define TASK_RFID_STACK 8192
 #define TASK_SYNC_STACK 8192
 #define TASK_DISPLAY_STACK 12288
@@ -134,11 +139,51 @@
 #define TASK_SYNC_PRIORITY 2
 #define TASK_DISPLAY_PRIORITY 1
 #define RFID_QUEUE_LEN 8
-#define DEEP_SLEEP_TASK_WAIT_MS 5000UL
 #define DEVICE_NAME_MAX_LEN 19
 #define MAX_BOOT_TIME_SYNC_RETRIES 5
 #define RTC_I2C_ADDR 0x68 // DS1307 / DS3231, bus I2C sama dengan OLED (GPIO 8/9)
 #define RTC_MIN_VALID_YEAR 2025
+#define MIN_VALID_EPOCH 1735689600L // 2025-01-01 00:00:00 UTC. HARUS selaras dengan RTC_MIN_VALID_YEAR
+#define NTP_SERVER_TIMEOUT_MS 3000UL
+#define TZ_POSIX "WIB-7"
+#ifndef LOG_LEVEL
+#define LOG_LEVEL 3 // 0=mati 1=E 2=W 3=I 4=D. Rilis hemat: -DLOG_LEVEL=0
+#endif
+#define LOG_E(...)                \
+  do                              \
+  {                               \
+    if (LOG_LEVEL >= 1)           \
+      Serial.printf(__VA_ARGS__); \
+  } while (0)
+#define LOG_W(...)                \
+  do                              \
+  {                               \
+    if (LOG_LEVEL >= 2)           \
+      Serial.printf(__VA_ARGS__); \
+  } while (0)
+#define LOG_I(...)                \
+  do                              \
+  {                               \
+    if (LOG_LEVEL >= 3)           \
+      Serial.printf(__VA_ARGS__); \
+  } while (0)
+#define LOG_D(...)                \
+  do                              \
+  {                               \
+    if (LOG_LEVEL >= 4)           \
+      Serial.printf(__VA_ARGS__); \
+  } while (0)
+#define SERIAL_TX_NONBLOCK 0 // D2: set 1 hanya setelah uji 3.6 membuktikan pemblokiran
+#define MAX_RC522_RESTARTS 3
+#define SLEEP_PARK_TIMEOUT_MS 60000UL
+#define SLEEP_RETRY_MS 30000UL
+#define SLEEP_GPIO_HOLD 0 // TIDAK TERUJI: aktifkan hanya setelah arus diukur
+#define NVS_KEY_BOOT_CNT "boot_cnt"
+#define NVS_KEY_ABN_CNT "abn_cnt"
+#define NVS_KEY_LAST_ABN "last_abn"
+#define NVS_KEY_RC_FAIL "rc_fail"
+#define NVS_KEY_OTA_TRY "ota_try"
+#define NVS_KEY_OTA_BAD "ota_bad"
 // Jam hasil estimasi NVS (cold boot tanpa RTC) tidak menghitung lama listrik mati.
 // 1 = scan ditolak sampai NTP/RTC berhasil. 0 = scan tetap diterima dengan jam estimasi.
 #define REJECT_SCAN_UNTRUSTED_TIME 1
@@ -147,6 +192,15 @@
 #define CRED_PLAIN_MAX (CRED_DATA_MAX - 1)
 // Kosong = wajib diisi lewat provisioning. Jangan isi domain satu sekolah di firmware generik.
 #define DEFAULT_API_URL ""
+#define QUEUE_HEADER_LINE "rfid,timestamp,device_id,unix_time,crc8"
+#define QUARANTINE_FILE "/quarantine.csv"
+#define QUARANTINE_OLD "/quarantine.old"
+#define QUARANTINE_MAX_BYTES 262144UL // ±1500 baris, lalu rotasi ke .old (menimpa .old lama)
+#define LINE_OK 0
+#define LINE_EMPTY 1
+#define LINE_MALFORMED 2
+#define LINE_BAD_CRC 3
+#define LINE_EXPIRED 4
 // Penanda versi di dalam image, dibaca saat OTA untuk mencocokkan versi yang ditawarkan server.
 // `retain` mencegah linker membuang variabel ini (gc-sections). Referensi runtime di setup()
 // menjadi pengaman kedua, karena pada toolchain tertentu `retain` diabaikan.
@@ -235,13 +289,7 @@ struct OtaState
   char url[128];
   char md5[36];
 };
-struct OtaVerScan
-{
-  uint8_t st = 0;
-  uint8_t vl = 0;
-  bool found = false;
-  char ver[16] = "";
-};
+
 struct RfidScanEvent
 {
   uint8_t uid[10];
@@ -293,9 +341,11 @@ char deviceName[DEVICE_NAME_MAX_LEN + 1] = "";
 char provApPassword[16] = "";
 bool isOnline = false;
 bool sdCardAvailable = false;
-bool oledIsOn = true;
+uint8_t sdInitErr = 0; // sd.sdErrorCode() saat sd.begin gagal; 0 + gagal = FS tidak valid
+volatile bool oledIsOn = true;
 bool isProvisioned = false;
 bool rtcPresent = false; // RTC eksternal terdeteksi saat boot (opsional)
+bool rfidReady = true;   // false = RC522 tidak merespons (mode terdegradasi)
 // true hanya jika jam dipulihkan dari NVS setelah cold boot. Tidak mencakup lama listrik mati.
 bool timeFromNvsOnly = false;
 volatile bool wdtExtended = false;
@@ -324,6 +374,7 @@ SemaphoreHandle_t xCacheMutex = nullptr;
 SemaphoreHandle_t xDisplayMutex = nullptr;
 QueueHandle_t xRfidQueue = nullptr;
 volatile bool sleepRequested = false;
+volatile bool parkRfid = false, parkSync = false, parkDisp = false; // true = task berhenti di titik aman
 volatile bool otaInProgress = false;
 volatile bool forceSyncRequested = false; // diset taskRfid (kartu admin), dikonsumsi taskSync
 // Naik setiap kali isi antrean SD berubah (record ditambah / file dihapus setelah sync).
@@ -370,27 +421,6 @@ static void unlockCache()
     xSemaphoreGive(xCacheMutex);
 }
 
-static uint8_t crc8(const uint8_t *data, size_t len)
-{
-  uint8_t crc = 0x00;
-  for (size_t i = 0; i < len; i++)
-  {
-    crc ^= data[i];
-    for (int b = 0; b < 8; b++)
-      crc = (crc & 0x80) ? ((crc << 1) ^ CRC8_POLY) : (crc << 1);
-  }
-  return crc;
-}
-static uint8_t recordCrc8(const char *rfid, unsigned long t)
-{
-  uint8_t buf[14];
-  memcpy(buf, rfid, 10);
-  buf[10] = (t >> 24) & 0xFF;
-  buf[11] = (t >> 16) & 0xFF;
-  buf[12] = (t >> 8) & 0xFF;
-  buf[13] = (t) & 0xFF;
-  return crc8(buf, 14);
-}
 static void deriveAesKey(uint8_t key[16])
 {
   uint8_t mac[6];
@@ -501,7 +531,7 @@ static bool buildApiUrl(char *out, size_t outSz, const char *path)
   return n > 0 && (size_t)n < outSz;
 }
 static void urlEncode(const char *src, char *dst, size_t dstSize);
-static bool isInWindow(int h, int start, int end);
+
 // Karakter aman untuk CSV, JSON manual, dan URL.
 static bool isSafeDeviceNameChar(char c)
 {
@@ -551,7 +581,7 @@ static void loadCredentials()
   };
   auto clampInterval = [](unsigned long v, unsigned long def)
   {
-    return (v >= 5000UL) ? v : def;
+    return (v >= CFG_INTERVAL_MIN_MS && v <= CFG_INTERVAL_MAX_MS) ? v : def;
   };
   rtCfg.sleepStartHour = clampHour(slpS, SLEEP_START_HOUR_DEFAULT);
   rtCfg.sleepEndHour = clampHour(slpE, SLEEP_END_HOUR_DEFAULT);
@@ -698,79 +728,40 @@ bool isSignalCritical()
 {
   return !isWifiConnected() || WiFi.RSSI() < SIGNAL_THRESHOLD_CRITICAL;
 }
-void extendWdtForSync()
+static bool wdtApply(uint32_t ms)
 {
-  if (!hTaskRfid && !hTaskSync && !hTaskDisplay)
-  {
-    return;
-  }
-  portENTER_CRITICAL(&wdtMux);
-  if (wdtExtended)
-  {
-    portEXIT_CRITICAL(&wdtMux);
-    return;
-  }
-  wdtExtended = true;
-  portEXIT_CRITICAL(&wdtMux);
-  if (hTaskLoop)
-    esp_task_wdt_delete(hTaskLoop);
-  if (hTaskRfid)
-    esp_task_wdt_delete(hTaskRfid);
-  if (hTaskSync)
-    esp_task_wdt_delete(hTaskSync);
-  if (hTaskDisplay)
-    esp_task_wdt_delete(hTaskDisplay);
-  esp_task_wdt_deinit();
   const esp_task_wdt_config_t cfg = {
-      .timeout_ms = (uint32_t)WDT_SYNC_TIMEOUT_MS,
+      .timeout_ms = ms,
       .idle_core_mask = 0,
       .trigger_panic = true};
-  esp_task_wdt_init(&cfg);
-  if (hTaskLoop)
-    esp_task_wdt_add(hTaskLoop);
-  if (hTaskRfid)
-    esp_task_wdt_add(hTaskRfid);
-  if (hTaskSync)
-    esp_task_wdt_add(hTaskSync);
-  if (hTaskDisplay)
-    esp_task_wdt_add(hTaskDisplay);
+  esp_err_t e = esp_task_wdt_reconfigure(&cfg); // task tetap terdaftar: tidak ada jendela tanpa pengawasan
+  if (e != ESP_OK)
+    LOG_E("[WDT] reconfigure %lu ms gagal err=%d\n", (unsigned long)ms, (int)e);
+  else
+    LOG_I("[WDT] timeout %lu ms\n", (unsigned long)ms);
+  return e == ESP_OK;
+}
+void extendWdtForSync()
+{
+  portENTER_CRITICAL(&wdtMux);
+  bool already = wdtExtended;
+  wdtExtended = true;
+  portEXIT_CRITICAL(&wdtMux);
+  if (already)
+    return;
+  if (!wdtApply(WDT_SYNC_TIMEOUT_MS))
+    wdtExtended = false;
 }
 void restoreWdtNormal()
 {
-  if (!hTaskRfid && !hTaskSync && !hTaskDisplay)
-  {
-    return;
-  }
   portENTER_CRITICAL(&wdtMux);
-  if (!wdtExtended)
-  {
-    portEXIT_CRITICAL(&wdtMux);
-    return;
-  }
+  bool was = wdtExtended;
   wdtExtended = false;
   portEXIT_CRITICAL(&wdtMux);
-  if (hTaskLoop)
-    esp_task_wdt_delete(hTaskLoop);
-  if (hTaskRfid)
-    esp_task_wdt_delete(hTaskRfid);
-  if (hTaskSync)
-    esp_task_wdt_delete(hTaskSync);
-  if (hTaskDisplay)
-    esp_task_wdt_delete(hTaskDisplay);
-  esp_task_wdt_deinit();
-  const esp_task_wdt_config_t cfg = {
-      .timeout_ms = WDT_NORMAL_TIMEOUT_MS,
-      .idle_core_mask = 0,
-      .trigger_panic = true};
-  esp_task_wdt_init(&cfg);
-  if (hTaskLoop)
-    esp_task_wdt_add(hTaskLoop);
-  if (hTaskRfid)
-    esp_task_wdt_add(hTaskRfid);
-  if (hTaskSync)
-    esp_task_wdt_add(hTaskSync);
-  if (hTaskDisplay)
-    esp_task_wdt_add(hTaskDisplay);
+  if (!was)
+    return;
+  if (!wdtApply(WDT_NORMAL_TIMEOUT_MS))
+    wdtExtended = true;
 }
 void turnOffOLED()
 {
@@ -928,9 +919,8 @@ void nvsBumpScanCount()
   if (!lockNvs())
     return;
   prefs.begin(NVS_NAMESPACE, false);
-  char stored[9];
-  strncpy(stored, prefs.getString(NVS_KEY_SCAN_DATE, "").c_str(), 8);
-  stored[8] = '\0';
+  char stored[9] = "";
+  prefs.getString(NVS_KEY_SCAN_DATE, stored, sizeof(stored));
   int cnt = strcmp(stored, today) == 0 ? prefs.getInt(NVS_KEY_SCAN_COUNT, 0) : 0;
   prefs.putString(NVS_KEY_SCAN_DATE, today);
   prefs.putInt(NVS_KEY_SCAN_COUNT, cnt + 1);
@@ -970,6 +960,124 @@ void nvsSetBootRetry(int v)
     prefs.putInt(NVS_KEY_BOOT_RETRY, v);
   prefs.end();
   unlockNvs();
+}
+static int nvsGetI(const char *key)
+{
+  if (!lockNvs())
+    return 0;
+  prefs.begin(NVS_NAMESPACE, true);
+  int v = prefs.getInt(key, 0);
+  prefs.end();
+  unlockNvs();
+  return v;
+}
+static void nvsSetIChanged(const char *key, int v)
+{
+  if (!lockNvs())
+    return;
+  prefs.begin(NVS_NAMESPACE, false);
+  if (prefs.getInt(key, 0) != v)
+    prefs.putInt(key, v);
+  prefs.end();
+  unlockNvs();
+}
+
+static int diagBootCount = 0;
+static int diagAbnormalCount = 0;
+static int diagResetReason = 0;
+static int diagLastAbnormal = 0;
+
+static const char *resetReasonName(esp_reset_reason_t r)
+{
+  switch (r)
+  {
+  case ESP_RST_UNKNOWN:
+    return "NONE";
+  case ESP_RST_POWERON:
+    return "POWERON";
+  case ESP_RST_EXT:
+    return "EXT";
+  case ESP_RST_SW:
+    return "SW";
+  case ESP_RST_PANIC:
+    return "PANIC";
+  case ESP_RST_INT_WDT:
+    return "INT_WDT";
+  case ESP_RST_TASK_WDT:
+    return "TASK_WDT";
+  case ESP_RST_WDT:
+    return "WDT";
+  case ESP_RST_DEEPSLEEP:
+    return "DEEPSLEEP";
+  case ESP_RST_BROWNOUT:
+    return "BROWNOUT";
+  default:
+    return "OTHER";
+  }
+}
+static bool isAbnormalReset(esp_reset_reason_t r)
+{
+  return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT ||
+         r == ESP_RST_WDT || r == ESP_RST_BROWNOUT;
+}
+static void bootDiagRecord()
+{
+  esp_reset_reason_t rr = esp_reset_reason();
+  diagResetReason = (int)rr;
+  diagBootCount = nvsGetI(NVS_KEY_BOOT_CNT);
+  diagAbnormalCount = nvsGetI(NVS_KEY_ABN_CNT);
+  diagLastAbnormal = nvsGetI(NVS_KEY_LAST_ABN);
+  if (rr != ESP_RST_DEEPSLEEP)
+  {
+    diagBootCount++;
+    nvsSetIChanged(NVS_KEY_BOOT_CNT, diagBootCount);
+  }
+  if (isAbnormalReset(rr))
+  {
+    diagAbnormalCount++;
+    diagLastAbnormal = (int)rr;
+    nvsSetIChanged(NVS_KEY_ABN_CNT, diagAbnormalCount);
+    nvsSetIChanged(NVS_KEY_LAST_ABN, diagLastAbnormal);
+  }
+  LOG_I("[BOOT] reset=%s boot=%d abnormal=%d last_abn=%s heap=%u\n",
+        resetReasonName(rr), diagBootCount, diagAbnormalCount,
+        resetReasonName((esp_reset_reason_t)diagLastAbnormal), (unsigned)esp_get_free_heap_size());
+}
+static uint32_t taskStackHwm(TaskHandle_t h)
+{
+  return h ? (uint32_t)uxTaskGetStackHighWaterMark(h) : 0; // ASUMSI: byte di ESP-IDF
+}
+static void otaTrackAttempt(const char *ver)
+{
+  if (!lockNvs())
+    return;
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString(NVS_KEY_OTA_TRY, ver);
+  prefs.end();
+  unlockNvs();
+}
+static void otaResolveAtBoot()
+{
+  String bad;
+  if (!lockNvs())
+    return;
+  prefs.begin(NVS_NAMESPACE, false);
+  String t = prefs.getString(NVS_KEY_OTA_TRY, "");
+  bad = prefs.getString(NVS_KEY_OTA_BAD, "");
+  if (t.length() > 0)
+  {
+    if (!t.equals(FIRMWARE_VERSION))
+    {
+      bad = t;
+      prefs.putString(NVS_KEY_OTA_BAD, bad);
+      LOG_W("[OTA] v%s tidak berjalan (rollback?), ditandai buruk\n", t.c_str());
+    }
+    prefs.remove(NVS_KEY_OTA_TRY);
+  }
+  prefs.end();
+  unlockNvs();
+  strncpy(otaRejectedVer, bad.c_str(), sizeof(otaRejectedVer) - 1);
+  otaRejectedVer[sizeof(otaRejectedVer) - 1] = '\0';
 }
 
 int nvsGetCount()
@@ -1117,16 +1225,17 @@ void nvsSaveLastScan(const char *rfid, unsigned long t)
 
 bool nvsIsRecentScan(const char *rfid, unsigned long t)
 {
+  char stored[11] = "";
   if (!lockNvs())
     return false;
   prefs.begin(NVS_NAMESPACE, true);
-  String storedRfid = prefs.getString(NVS_KEY_LAST_RFID, "");
+  prefs.getString(NVS_KEY_LAST_RFID, stored, sizeof(stored));
   unsigned long storedT = prefs.getULong(NVS_KEY_LAST_SCAN_T, 0);
   prefs.end();
   unlockNvs();
-  if (storedRfid.length() == 0 || storedT == 0)
+  if (stored[0] == '\0' || storedT == 0)
     return false;
-  if (storedRfid != String(rfid))
+  if (strcmp(stored, rfid) != 0)
     return false;
   return (t >= storedT && (t - storedT) < MIN_REPEAT_INTERVAL);
 }
@@ -1260,51 +1369,49 @@ static RfidLookup rfidLookupCache(const char *rfid)
 
 void loadAdminRfidList()
 {
-  adminRfidCount = 0;
+  char tmp[5][11];
+  int cnt = 0;
   if (!sdCardAvailable)
-  {
-    return;
-  }
+    return; // daftar lama dipertahankan
   if (!acquireSD())
-  {
-    return;
-  }
+    return; // gagal ambil mutex: jangan kosongkan daftar lama
   selectSD();
-  if (!sd.exists(ADMIN_RFID_FILE))
-  {
-    deselectSD();
-    releaseSD();
-    return;
-  }
   FsFile f;
-  if (!f.open(ADMIN_RFID_FILE, O_RDONLY))
+  if (sd.exists(ADMIN_RFID_FILE) && f.open(ADMIN_RFID_FILE, O_RDONLY))
   {
-    deselectSD();
-    releaseSD();
-    return;
-  }
-  char line[12];
-  while (f.fgets(line, sizeof(line)) > 0 && adminRfidCount < 5)
-  {
-    int len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-      line[--len] = '\0';
-    if (len == 10)
+    char line[12];
+    while (cnt < 5 && f.fgets(line, sizeof(line)) > 0)
     {
-      memcpy(adminRfidList[adminRfidCount], line, 11);
-      adminRfidCount++;
+      int len = strlen(line);
+      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+      if (len == 10)
+      {
+        memcpy(tmp[cnt], line, 11);
+        cnt++;
+      }
     }
+    f.close();
   }
-  f.close();
   deselectSD();
   releaseSD();
+  portENTER_CRITICAL(&wdtMux); // tukar sangat singkat; pembaca tidak pernah melihat daftar kosong sementara
+  memcpy(adminRfidList, tmp, sizeof(adminRfidList));
+  adminRfidCount = cnt;
+  portEXIT_CRITICAL(&wdtMux);
 }
 bool isAdminRfid(const char *rfid)
 {
+  bool found = false;
+  portENTER_CRITICAL(&wdtMux);
   for (int i = 0; i < adminRfidCount; i++)
     if (strcmp(adminRfidList[i], rfid) == 0)
-      return true;
-  return false;
+    {
+      found = true;
+      break;
+    }
+  portEXIT_CRITICAL(&wdtMux);
+  return found;
 }
 void handleAdminScan(const char *rfid)
 {
@@ -1325,17 +1432,6 @@ void handleAdminScan(const char *rfid)
 // ---- RTC eksternal opsional (DS1307 / DS3231). Menyimpan waktu UTC. ----
 static uint8_t bcd2bin(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
 static uint8_t bin2bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
-
-// Hari sejak 1970-01-01 untuk tanggal kalender, tanpa bergantung pada timegm().
-static int64_t daysFromCivil(int y, unsigned m, unsigned d)
-{
-  y -= (m <= 2);
-  const int era = (y >= 0 ? y : y - 399) / 400;
-  const unsigned yoe = (unsigned)(y - era * 400);
-  const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
-  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  return (int64_t)era * 146097 + (int64_t)doe - 719468;
-}
 
 // Bus I2C dibagi dengan OLED, jadi dilindungi mutex yang sama.
 static bool rtcBusLock()
@@ -1424,13 +1520,13 @@ static void rtcInitAndApply()
   rtcPresent = rtcDetect();
   if (!rtcPresent)
   {
-    Serial.println("[RTC] tidak terdeteksi (opsional)");
+    LOG_I("[RTC] tidak terdeteksi (opsional)\n");
     return;
   }
   time_t e;
   if (!rtcReadEpoch(&e))
   {
-    Serial.println("[RTC] terdeteksi, waktu belum valid; menunggu NTP");
+    LOG_W("[RTC] terdeteksi, waktu belum valid; menunggu NTP\n");
     showOLED(F("RTC"), "BELUM DI-SET");
     delay(800);
     return;
@@ -1447,7 +1543,7 @@ static void rtcInitAndApply()
   localtime_r(&e, &ti);
   char buf[20];
   snprintf(buf, sizeof(buf), "%02d:%02d", ti.tm_hour, ti.tm_min);
-  Serial.printf("[RTC] dipakai sebagai waktu awal: %s\n", buf);
+  LOG_I("[RTC] dipakai sebagai waktu awal: %s\n", buf);
   showOLED(F("RTC OK"), buf);
   delay(800);
 }
@@ -1458,7 +1554,7 @@ static void rtcSyncFromSystem()
   if (!rtcPresent)
     return;
   time_t now = time(nullptr);
-  if (now < 1577836800)
+  if (now < MIN_VALID_EPOCH)
     return;
   time_t cur;
   if (rtcReadEpoch(&cur))
@@ -1468,7 +1564,7 @@ static void rtcSyncFromSystem()
       return;
   }
   if (rtcWriteEpoch(now))
-    Serial.println("[RTC] diperbarui dari NTP");
+    LOG_I("[RTC] diperbarui dari NTP\n");
 }
 
 // Satu sumber epoch untuk SEMUA tempat (simpan, duplikat, scan count, filter umur).
@@ -1476,13 +1572,14 @@ static void rtcSyncFromSystem()
 bool getEpochWithFallback(time_t *out)
 {
   time_t now = time(nullptr);
-  if (now >= 1577836800) // 2020-01-01, jam sistem valid
+  if (now >= MIN_VALID_EPOCH) // jam sistem valid
   {
     *out = now;
     return true;
   }
   if (!timeWasSynced || lastValidTime == 0 || !bootTimeSet)
     return false;
+  // Selisih unsigned aman terhadap wrap millis, asal bootTime berasal dari boot ini (lihat setup()).
   unsigned long elapsed = (millis() - bootTime) / 1000UL;
   if (elapsed > MAX_TIME_ESTIMATE_AGE)
     return false;
@@ -1520,9 +1617,28 @@ bool isTimeValid()
 // Estimasi NVS setelah cold boot tidak tepercaya karena lama mati tidak terhitung.
 bool isTimeTrusted()
 {
-  if (time(nullptr) >= 1577836800) // 2020-01-01
+  if (time(nullptr) >= MIN_VALID_EPOCH)
     return true;
   return !timeFromNvsOnly && isTimeValid();
+}
+
+// Segarkan jangkar di RTC memory HANYA dari jam sistem sungguhan, tidak pernah dari estimasi,
+// supaya batas MAX_TIME_ESTIMATE_AGE tidak diperpanjang oleh estimasi itu sendiri.
+// Pengecualian kedua (setelah isTimeTrusted) terhadap aturan "semua epoch lewat getEpochWithFallback".
+static void anchorTimeFromSystem()
+{
+  static unsigned long last = 0;
+  unsigned long n = millis();
+  if (last != 0 && n - last < 60000UL)
+    return;
+  last = n ? n : 1;
+  time_t t = time(nullptr);
+  if (t < MIN_VALID_EPOCH)
+    return;
+  lastValidTime = t;
+  timeWasSynced = true;
+  bootTime = n;
+  bootTimeSet = true;
 }
 
 void getFormattedTimestamp(char *buf, size_t sz)
@@ -1535,40 +1651,62 @@ void getFormattedTimestamp(char *buf, size_t sz)
   }
   strftime(buf, sz, "%Y-%m-%d %H:%M:%S", &ti);
 }
+
+// Naik setiap SNTP benar-benar mengatur jam. Tidak terpengaruh jam sistem yang sudah valid.
+static volatile uint32_t sntpSyncCount = 0;
+static void onSntpSync(struct timeval *tv)
+{
+  (void)tv;
+  sntpSyncCount = sntpSyncCount + 1;
+}
+
 bool syncTimeWithFallback()
 {
   if (isSignalCritical())
   {
     return false;
   }
+  static bool cbSet = false;
+  if (!cbSet)
+  {
+    sntp_set_time_sync_notification_cb(onSntpSync);
+    cbSet = true;
+  }
   const char *servers[] = {NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3};
   for (int i = 0; i < 3; i++)
   {
     char srv[32];
     strcpy_P(srv, servers[i]);
-    configTime(GMT_OFFSET_SEC, 0, srv);
-    struct tm ti;
+    uint32_t before = sntpSyncCount;
+    configTzTime(TZ_POSIX, srv); // TZ tetap WIB-7, tidak ditimpa "UTC-7"
     unsigned long t0 = millis();
-    while (millis() - t0 < 2500)
+    while (millis() - t0 < NTP_SERVER_TIMEOUT_MS)
     {
       esp_task_wdt_reset();
-      if (getLocalTime(&ti, 0) && ti.tm_year >= 120)
+      if (sntpSyncCount != before)
       {
-        lastValidTime = mktime(&ti);
+        time_t now = time(nullptr);
+        if (now < MIN_VALID_EPOCH)
+          break; // callback terpanggil tetapi jam tidak masuk akal: server berikutnya
+        lastValidTime = now;
         nvsSaveLastTime(lastValidTime);
         timeWasSynced = true;
         bootTime = millis();
         bootTimeSet = true;
         bootTimeSyncFailed = false;
         rtcSyncFromSystem();
+        struct tm ti;
+        localtime_r(&now, &ti);
         char buf[6];
         snprintf(buf, sizeof(buf), "%02d:%02d", ti.tm_hour, ti.tm_min);
+        LOG_I("[TIME] SNTP OK via %s epoch=%lld %02d:%02d\n", srv, (long long)now, ti.tm_hour, ti.tm_min);
         showOLED(F("WAKTU TERSYNC"), buf);
         delay(1000);
         return true;
       }
       delay(100);
     }
+    LOG_I("[TIME] SNTP timeout via %s\n", srv);
   }
   return false;
 }
@@ -1597,6 +1735,30 @@ void checkOLEDSchedule()
   else
     turnOnOLED();
 }
+// Panggil saat xSdMutex dipegang dan f dibuka O_RDWR|O_APPEND.
+// size==0: tulis header (file ada tapi kosong akibat daya putus setelah O_CREAT).
+// byte terakhir bukan '\n': tutup baris parsial agar record berikutnya tidak menempel.
+static bool prepareAppendLocked(FsFile &f, const char *header)
+{
+  uint64_t sz = f.size();
+  if (sz == 0)
+  {
+    if (header && f.println(header) == 0)
+      return false;
+    return true;
+  }
+  if (!f.seekSet(sz - 1))
+    return false;
+  int last = f.read();
+  if (last < 0)
+    return false;
+  if (last != '\n')
+  {
+    if (f.write((uint8_t)'\n') != 1) // O_APPEND: selalu menulis di akhir file
+      return false;
+  }
+  return true;
+}
 void appendFailedLogToSD(const char *rfid, const char *ts, const char *reason)
 {
   if (!sdCardAvailable)
@@ -1624,7 +1786,6 @@ void appendFailedLogToSD(const char *rfid, const char *ts, const char *reason)
 
   if (lineCount >= FAILED_LOG_MAX_LINES)
   {
-    // Rotasi: simpan log lama sebagai .old (menimpa .old sebelumnya), mulai log baru.
     if (sd.exists("/failed_log.old"))
       sd.remove("/failed_log.old");
     sd.rename("/failed_log.csv", "/failed_log.old");
@@ -1633,16 +1794,17 @@ void appendFailedLogToSD(const char *rfid, const char *ts, const char *reason)
   if (lineCount < FAILED_LOG_MAX_LINES)
   {
     FsFile logFile;
-    if (logFile.open("/failed_log.csv", O_WRONLY | O_CREAT | O_APPEND))
+    if (logFile.open("/failed_log.csv", O_RDWR | O_CREAT | O_APPEND))
     {
-      if (logFile.size() == 0)
-        logFile.println(F("rfid,timestamp,reason"));
-      logFile.print(rfid);
-      logFile.print(',');
-      logFile.print(ts);
-      logFile.print(',');
-      logFile.println(reason);
-      logFile.sync();
+      if (prepareAppendLocked(logFile, "rfid,timestamp,reason"))
+      {
+        logFile.print(rfid);
+        logFile.print(',');
+        logFile.print(ts);
+        logFile.print(',');
+        logFile.println(reason);
+        logFile.sync();
+      }
       logFile.close();
     }
     else
@@ -1657,19 +1819,6 @@ void appendFailedLogToSD(const char *rfid, const char *ts, const char *reason)
 void getQueueFileName(int idx, char *buf, size_t sz)
 {
   snprintf(buf, sz, "/queue_%d.csv", idx);
-}
-// Ambil indeks dari nama "queue_N.csv" (tanpa "/"). Nama harus persis sama dengan format baku.
-static bool parseQueueIndex(const char *name, int *idx)
-{
-  int n = -1;
-  if (sscanf(name, "queue_%d.csv", &n) != 1 || n < 0 || n >= MAX_QUEUE_FILES)
-    return false;
-  char expect[24];
-  snprintf(expect, sizeof(expect), "queue_%d.csv", n);
-  if (strcmp(expect, name) != 0)
-    return false;
-  *idx = n;
-  return true;
 }
 
 // Cari file antrean dengan indeks terkecil >= fromIdx lewat iterasi direktori (tahan celah indeks).
@@ -1874,6 +2023,8 @@ bool fileHasValidRecords(const char *fn)
   file.close();
   return found;
 }
+static int classifyQueueLine(char *line, OfflineRecord *out, time_t now, bool nowValid);
+
 int countValidRecordsInFileLocked(const char *fn)
 {
   if (!file.open(fn, O_RDONLY))
@@ -1883,25 +2034,14 @@ int countValidRecordsInFileLocked(const char *fn)
   int cnt = 0;
   char line[144];
   if (file.available())
-    file.fgets(line, sizeof(line));
+    file.fgets(line, sizeof(line)); // header
   while (file.available())
   {
     esp_task_wdt_reset();
     taskYIELD();
     if (file.fgets(line, sizeof(line)) <= 0)
       break;
-    int len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-      line[--len] = '\0';
-    if (len < 10)
-      continue;
-    char *c1 = strchr(line, ',');
-    char *c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
-    char *c3 = c2 ? strchr(c2 + 1, ',') : nullptr;
-    if (!c3)
-      continue;
-    unsigned long recT = strtoul(c3 + 1, nullptr, 10);
-    if (recT > 0 && !isRecordExpired(recT, now, nowValid))
+    if (classifyQueueLine(line, nullptr, now, nowValid) == LINE_OK)
       cnt++;
   }
   file.close();
@@ -1923,7 +2063,7 @@ int countAllOfflineRecords()
   for (;;)
   {
     esp_task_wdt_reset();
-    taskYIELD();
+    vTaskDelay(1); // melepas CPU ke prioritas lebih rendah (loop), bukan taskYIELD()
     if (!acquireSD(pdMS_TO_TICKS(2000)))
       return -1;
     selectSD();
@@ -1953,14 +2093,15 @@ void refreshPendingCache()
 {
   if (!pendingCacheDirty)
     return;
+  pendingCacheDirty = false; // dibersihkan SEBELUM menghitung
   uint32_t before = queueMutations;
   int n = countAllOfflineRecords();
-  if (n < 0)
-    return; // gagal, biarkan dirty dan coba lagi
-  if (queueMutations != before)
-    return; // antrean berubah saat dihitung, hasil basi; tetap dirty dan hitung ulang nanti
+  if (n < 0 || queueMutations != before)
+  {
+    pendingCacheDirty = true; // gagal atau hasil basi
+    return;
+  }
   cachedPendingRecords = n;
-  pendingCacheDirty = false;
   if (!acquireSD(pdMS_TO_TICKS(1000)))
     return;
   saveMetadataLocked();
@@ -2037,6 +2178,257 @@ bool isDuplicateLocked(const char *rfid, unsigned long t)
   }
   return false;
 }
+// "YYYY-MM-DD HH:MM:SS" tepat 19 karakter. Bentuk lain pasti ditolak server.
+static bool looksLikeTimestamp(const char *s)
+{
+  for (int i = 0; i < 19; i++)
+  {
+    char c = s[i];
+    if (i == 4 || i == 7)
+    {
+      if (c != '-')
+        return false;
+    }
+    else if (i == 10)
+    {
+      if (c != ' ')
+        return false;
+    }
+    else if (i == 13 || i == 16)
+    {
+      if (c != ':')
+        return false;
+    }
+    else if (c < '0' || c > '9')
+      return false;
+  }
+  return true;
+}
+// Klasifikasi satu baris data antrean (header sudah dilewati pemanggil). Mengubah `line` hanya
+// dengan membuang CR/LF. out boleh nullptr. Mengembalikan LINE_*.
+static int classifyQueueLine(char *line, OfflineRecord *out, time_t now, bool nowValid)
+{
+  int len = strlen(line);
+  while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+    line[--len] = '\0';
+  if (len == 0)
+    return LINE_EMPTY;
+  if (len < 10)
+    return LINE_MALFORMED;
+  char *c1 = strchr(line, ',');
+  char *c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
+  char *c3 = c2 ? strchr(c2 + 1, ',') : nullptr;
+  char *c4 = c3 ? strchr(c3 + 1, ',') : nullptr;
+  if (!c1 || !c2 || !c3)
+    return LINE_MALFORMED;
+  int rl = c1 - line, tl = c2 - c1 - 1, dl = c3 - c2 - 1;
+  // Server menolak SELURUH batch bila satu item rfid != 10 karakter atau timestamp tidak valid,
+  // sehingga file macet selamanya. Tolak di sini agar baris itu masuk karantina.
+  if (rl != 10 || tl != 19 || dl > 19 || !looksLikeTimestamp(c1 + 1))
+    return LINE_MALFORMED;
+  unsigned long recT = strtoul(c3 + 1, nullptr, 10);
+  if (recT == 0)
+    return LINE_MALFORMED;
+  if (c4)
+  {
+    char rfidTmp[11];
+    memset(rfidTmp, 0, sizeof(rfidTmp));
+    memcpy(rfidTmp, line, rl);
+    char expected[3];
+    snprintf(expected, sizeof(expected), "%02X", (unsigned)recordCrc8(rfidTmp, recT));
+    if (strncmp(c4 + 1, expected, 2) != 0 || c4[3] != '\0')
+      return LINE_BAD_CRC;
+  }
+  if (isRecordExpired(recT, now, nowValid))
+    return LINE_EXPIRED;
+  if (out)
+  {
+    memset(out, 0, sizeof(OfflineRecord));
+    memcpy(out->rfid, line, rl);
+    memcpy(out->timestamp, c1 + 1, tl);
+    memcpy(out->deviceId, c2 + 1, dl);
+    out->unixTime = recT;
+  }
+  return LINE_OK;
+}
+
+static bool openQuarantineLocked(FsFile &q)
+{
+  if (sd.exists(QUARANTINE_FILE))
+  {
+    FsFile t;
+    if (t.open(QUARANTINE_FILE, O_RDONLY))
+    {
+      uint64_t sz = t.size();
+      t.close();
+      if (sz > QUARANTINE_MAX_BYTES)
+      {
+        if (sd.exists(QUARANTINE_OLD))
+          sd.remove(QUARANTINE_OLD);
+        sd.rename(QUARANTINE_FILE, QUARANTINE_OLD);
+      }
+    }
+  }
+  if (!q.open(QUARANTINE_FILE, O_RDWR | O_CREAT | O_APPEND))
+    return false;
+  if (!prepareAppendLocked(q, "reason,source,raw_line"))
+  {
+    q.close();
+    return false;
+  }
+  return true;
+}
+
+// Salin semua baris yang TIDAK akan terkirim ke karantina. Panggil dengan xSdMutex + selectSD().
+// sentCnt = jumlah record sah yang memang dikirim; record sah berikutnya (>= sentCnt) dicatat "UNSENT".
+// false = karantina gagal ditulis: pemanggil JANGAN menghapus file.
+static bool quarantineRejectedLocked(const char *fn, int sentCnt, uint64_t keepMask)
+{
+  FsFile src;
+  if (!src.open(fn, O_RDONLY))
+    return false;
+  time_t now = 0;
+  bool nowValid = getEpochWithFallback(&now);
+  FsFile q;
+  bool qOpen = false, ok = true;
+  int okOrd = 0;
+  char line[144];
+  if (src.available())
+    src.fgets(line, sizeof(line)); // header
+  while (src.available())
+  {
+    esp_task_wdt_reset();
+    if (src.fgets(line, sizeof(line)) <= 0)
+      break;
+    int rc = classifyQueueLine(line, nullptr, now, nowValid);
+    const char *reason = nullptr;
+    if (rc == LINE_OK)
+    {
+      int ord = okOrd++;
+      if (ord >= sentCnt)
+        reason = "UNSENT";
+      else if (ord < 64 && ((keepMask >> ord) & 1ULL))
+        continue; // retryable: dipertahankan di file, bukan dikarantina
+    }
+    else if (rc == LINE_EXPIRED)
+      reason = "EXPIRED";
+    else if (rc == LINE_BAD_CRC)
+      reason = "BAD_CRC";
+    else if (rc == LINE_MALFORMED)
+      reason = "MALFORMED";
+    if (!reason)
+      continue;
+    if (!qOpen)
+    {
+      if (!openQuarantineLocked(q))
+      {
+        ok = false;
+        break;
+      }
+      qOpen = true;
+    }
+    char outLn[200];
+    int n = snprintf(outLn, sizeof(outLn), "%s,%s,%s\r\n", reason, fn, line);
+    if (n <= 0 || n >= (int)sizeof(outLn) || q.write(outLn, (size_t)n) != (size_t)n)
+    {
+      ok = false;
+      break;
+    }
+  }
+  src.close();
+  if (qOpen)
+  {
+    if (ok)
+      q.sync();
+    q.close();
+  }
+  return ok;
+}
+
+// Satu-satunya cara menghapus file antrean di jalur normal.
+static bool removeQueueFileSafeLocked(const char *fn, int sentCnt)
+{
+  if (!quarantineRejectedLocked(fn, sentCnt, 0))
+    return false;
+  return sd.remove(fn);
+}
+
+// Server menerima sebagian; record retryable (bit di keepMask) dipertahankan, sisanya dikarantina/dibuang.
+// Tulis ke tmp lalu ganti. Jendela remove->rename sangat kecil; bila daya putus di situ, record ada
+// di /queue_keep.tmp (tidak dipindai sebagai antrean) untuk pemulihan manual.
+static bool keepRetryRecordsLocked(const char *fn, int sentCnt, uint64_t keepMask)
+{
+  if (!quarantineRejectedLocked(fn, sentCnt, keepMask))
+    return false;
+  const char *tmp = "/queue_keep.tmp";
+  FsFile src, dst;
+  if (!src.open(fn, O_RDONLY))
+    return false;
+  if (sd.exists(tmp))
+    sd.remove(tmp);
+  if (!dst.open(tmp, O_WRONLY | O_CREAT | O_TRUNC))
+  {
+    src.close();
+    return false;
+  }
+  time_t now = 0;
+  bool nowValid = getEpochWithFallback(&now);
+  bool ok = dst.println(QUEUE_HEADER_LINE) > 0;
+  int okOrd = 0;
+  char line[144];
+  if (src.available())
+    src.fgets(line, sizeof(line)); // header
+  while (ok && src.available())
+  {
+    esp_task_wdt_reset();
+    if (src.fgets(line, sizeof(line)) <= 0)
+      break;
+    if (classifyQueueLine(line, nullptr, now, nowValid) != LINE_OK)
+      continue; // line sudah bebas CR/LF
+    int ord = okOrd++;
+    if (ord < 64 && ((keepMask >> ord) & 1ULL))
+    {
+      char out[160];
+      int n = snprintf(out, sizeof(out), "%s\r\n", line);
+      if (n <= 0 || n >= (int)sizeof(out) || dst.write(out, (size_t)n) != (size_t)n)
+        ok = false;
+    }
+  }
+  src.close();
+  if (ok)
+    dst.sync();
+  dst.close();
+  if (!ok)
+  {
+    sd.remove(tmp);
+    return false; // file asli utuh; akan dikirim ulang (idempoten di server)
+  }
+  if (!sd.remove(fn))
+    return false;
+  return sd.rename(tmp, fn);
+}
+
+// Sisa dari keepRetryRecordsLocked(): daya putus antara remove(fn) dan rename(tmp, fn).
+// Nama asli tidak tersimpan, jadi cari indeks bebas terkecil dan pakai itu.
+// Panggil dengan selectSD() aktif dan sebelum penulisan antrean dimulai.
+static void recoverKeepTmpLocked()
+{
+  const char *tmp = "/queue_keep.tmp";
+  if (!sd.exists(tmp))
+    return;
+  char fn[24];
+  for (int i = 0; i < MAX_QUEUE_FILES; i++)
+  {
+    esp_task_wdt_reset();
+    getQueueFileName(i, fn, sizeof(fn));
+    if (sd.exists(fn))
+      continue;
+    if (sd.rename(tmp, fn))
+      LOG_I("[SD] pulihkan %s dari queue_keep.tmp\n", fn);
+    return;
+  }
+}
+
 bool initSDCard()
 {
   pinMode(PIN_SD_CS, OUTPUT);
@@ -2047,10 +2439,12 @@ bool initSDCard()
   delay(10);
   if (!sd.begin(PIN_SD_CS, SD_SCK_MHZ(10)))
   {
+    sdInitErr = sd.sdErrorCode();
     deselectSD();
     return false;
   }
   loadMetadataLocked();
+  recoverKeepTmpLocked();
   pendingCacheDirty = true;
   if (!rtcQueueFileValid)
   {
@@ -2075,8 +2469,7 @@ bool initSDCard()
         int cnt = countValidRecordsInFileLocked(fn);
         if (cnt == 0)
         {
-          sd.remove(fn);
-          if (file.open(fn, O_WRONLY | O_CREAT))
+          if (removeQueueFileSafeLocked(fn, 0) && file.open(fn, O_WRONLY | O_CREAT))
           {
             file.println(F("rfid,timestamp,device_id,unix_time,crc8"));
             file.close();
@@ -2119,9 +2512,12 @@ bool findAvailableQueueSlotLocked(int startIdx, int *outIdx)
     int cnt = countValidRecordsInFileLocked(fn);
     if (cnt == 0)
     {
-      sd.remove(fn);
-      *outIdx = idx;
-      return true;
+      if (removeQueueFileSafeLocked(fn, 0)) // sisa baris buruk masuk karantina dulu
+      {
+        *outIdx = idx;
+        return true;
+      }
+      continue; // karantina gagal: file dibiarkan, coba indeks lain
     }
     if (cnt < MAX_RECORDS_PER_FILE)
     {
@@ -2188,75 +2584,126 @@ SaveResult saveToQueue(const char *rfid, const char *ts, unsigned long t)
     file.println(F("rfid,timestamp,device_id,unix_time,crc8"));
     file.close();
   }
-  if (!file.open(curFn, O_WRONLY | O_APPEND))
+  if (!file.open(curFn, O_RDWR | O_APPEND))
   {
     deselectSD();
     releaseSD();
     return SAVE_SD_ERROR;
   }
+  // 1.1: tutup baris parsial / tulis header bila file kosong sebelum menambah record.
+  if (!prepareAppendLocked(file, QUEUE_HEADER_LINE))
+  {
+    file.close();
+    deselectSD();
+    releaseSD();
+    return SAVE_SD_ERROR;
+  }
   uint8_t crc = recordCrc8(rfid, t);
-  file.print(rfid);
-  file.print(',');
-  file.print(ts);
-  file.print(',');
-  file.print(deviceId);
-  file.print(',');
-  file.print(t);
-  file.print(',');
-  char crcBuf[3];
-  snprintf(crcBuf, sizeof(crcBuf), "%02X", crc);
-  file.println(crcBuf);
+  // Satu write() per baris (format CSV sama persis dengan sebelumnya, termasuk CRLF).
+  char lineBuf[96];
+  int n = snprintf(lineBuf, sizeof(lineBuf), "%s,%s,%s,%lu,%02X\r\n", rfid, ts, deviceId, t, (unsigned)crc);
+  if (n <= 0 || n >= (int)sizeof(lineBuf) || file.write(lineBuf, (size_t)n) != (size_t)n)
+  {
+    file.close();
+    deselectSD();
+    releaseSD();
+    return SAVE_SD_ERROR;
+  }
   file.sync();
   file.close();
   deselectSD();
   cachedPendingRecords++;
   if (cachedPendingRecords < 0)
     cachedPendingRecords = 0;
-  queueMutations++;
-  // pendingCacheDirty sengaja tidak disentuh: jika sedang dirty, hitung ulang tetap berlaku.
+  queueMutations = queueMutations + 1;
   if (fileSwitched)
-    saveMetadataLocked(); // hanya currentQueueFile yang perlu bertahan; jumlah dihitung ulang saat boot
+    saveMetadataLocked();
   releaseSD();
   return SAVE_OK;
 }
 
-// Dipanggil setelah server mengonfirmasi `sent` record pertama.
-// Record yang ditulis taskRfid selama HTTP (indeks >= sent) digeser ke indeks awal,
-// sehingga tidak ikut terhapus. Seluruh proses berada di satu kunci NVS.
-static bool nvsCompactAfterSync(int sent)
+// sentMask bit i = record indeks i benar-benar dimasukkan ke payload (i < cntAtSend).
+// Record tak terkirim (gagal dibaca karena mutex, atau ditulis saat HTTP) DIPERTAHANKAN.
+// Blob hilang/rusak (panjang salah) tidak bisa dikirim: dibuang dan dicatat.
+// Urutan aman power-loss: (1) salin ke bawah (hanya menimpa record yang sudah terkirim/rusak),
+// (2) putInt(count) = titik atomik, (3) hapus ekor. Daya putus di antara langkah = duplikat, bukan hilang.
+static bool nvsCompactAfterSync(uint64_t sentMask, int cntAtSend)
 {
-  if (sent <= 0)
-    return true;
   if (!lockNvs(pdMS_TO_TICKS(3000)))
-    return false; // record tetap ada dan akan dikirim ulang; server menolak duplikat
-
+    return false;
   prefs.begin(NVS_NAMESPACE, false);
   int total = prefs.getInt(NVS_KEY_COUNT, 0);
-
+  if (total > NVS_MAX_RECORDS)
+    total = NVS_MAX_RECORDS;
   char srcKey[16], dstKey[16];
-  int dst = 0;
-  for (int src = sent; src < total; src++)
+  int dst = 0, dropped = 0;
+  bool ok = true;
+  for (int src = 0; src < total; src++)
   {
+    bool wasSent = (src < cntAtSend && src < 64 && ((sentMask >> src) & 1ULL));
+    if (wasSent)
+      continue;
     snprintf(srcKey, sizeof(srcKey), "%s%d", NVS_KEY_PREFIX, src);
     if (prefs.getBytesLength(srcKey) != sizeof(OfflineRecord))
+    {
+      dropped++;
       continue;
-    OfflineRecord rec;
-    prefs.getBytes(srcKey, &rec, sizeof(OfflineRecord));
-    // dst selalu < src karena sent >= 1, jadi tidak menimpa record yang belum dibaca.
-    snprintf(dstKey, sizeof(dstKey), "%s%d", NVS_KEY_PREFIX, dst);
-    prefs.putBytes(dstKey, &rec, sizeof(OfflineRecord));
+    }
+    if (src != dst)
+    {
+      OfflineRecord rec;
+      prefs.getBytes(srcKey, &rec, sizeof(OfflineRecord));
+      snprintf(dstKey, sizeof(dstKey), "%s%d", NVS_KEY_PREFIX, dst);
+      if (prefs.putBytes(dstKey, &rec, sizeof(OfflineRecord)) != sizeof(OfflineRecord))
+      {
+        ok = false; // NVS penuh/gagal: count tidak diubah, tidak ada yang hilang
+        break;
+      }
+    }
     dst++;
   }
-
-  // Hapus sisa indeks lama dan set counter baru.
-  for (int k = dst; k < total; k++)
+  if (ok && dst != total)
   {
-    snprintf(dstKey, sizeof(dstKey), "%s%d", NVS_KEY_PREFIX, k);
-    prefs.remove(dstKey);
+    prefs.putInt(NVS_KEY_COUNT, dst);
+    for (int k = dst; k < total; k++)
+    {
+      snprintf(dstKey, sizeof(dstKey), "%s%d", NVS_KEY_PREFIX, k);
+      prefs.remove(dstKey);
+    }
   }
-  prefs.putInt(NVS_KEY_COUNT, dst);
   prefs.end();
   unlockNvs();
+  LOG_I("[NVS] compact ok=%d kept=%d dropped=%d\n", (int)ok, dst, dropped);
+  if (ok && dropped > 0)
+    appendFailedLogToSD("NVS", "BUFFER", "RECORD_RUSAK_DIBUANG");
+  return ok;
+}
+
+// Parse respons sync-bulk. true = JSON valid dan jumlah item == expected.
+// Error final dicatat ke failed_log. Error dengan "retryable":true ditandai di retryMask
+// (bit i = item ke-i sesuai urutan request) dan TIDAK dicatat; pemanggil mempertahankannya.
+static bool parseSyncReply(const String &body, int expected, uint64_t *retryMask)
+{
+  *retryMask = 0;
+  JsonDocument res;
+  if (deserializeJson(res, body) != DeserializationError::Ok || !res["data"].is<JsonArray>())
+    return false;
+  JsonArray arr = res["data"].as<JsonArray>();
+  if ((int)arr.size() != expected || expected > 64)
+    return false;
+  int i = 0;
+  for (JsonObject item : arr)
+  {
+    const char *st = item["status"] | "error";
+    if (strcmp(st, "error") == 0)
+    {
+      if (item["retryable"] | false)
+        *retryMask |= (1ULL << i);
+      else
+        appendFailedLogToSD(item["rfid"] | "unknown", item["timestamp"] | "unknown", item["message"] | "UNKNOWN");
+    }
+    i++;
+  }
   return true;
 }
 
@@ -2264,13 +2711,11 @@ bool nvsSyncToServer()
 {
   int cnt = nvsGetCount();
   if (cnt == 0)
-  {
     return true;
-  }
+  if (cnt > NVS_MAX_RECORDS)
+    cnt = NVS_MAX_RECORDS;
   if (isSignalCritical())
-  {
     return false;
-  }
   WiFiClientSecure client;
   applyTls(client);
   HTTPClient http;
@@ -2278,18 +2723,16 @@ bool nvsSyncToServer()
   http.setConnectTimeout(10000);
   char url[API_URL_BUF];
   if (!buildApiUrl(url, sizeof(url), "/api/presensi/sync-bulk"))
-  {
     return false;
-  }
   if (!http.begin(client, url))
-  {
     return false;
-  }
   http.addHeader(F("Content-Type"), F("application/json"));
   http.addHeader(F("X-API-KEY"), apiKey);
   JsonDocument doc;
   JsonArray arr = doc["data"].to<JsonArray>();
+  uint64_t sentMask = 0;
   int sentCnt = 0;
+  int idxOf[NVS_MAX_RECORDS];
   for (int i = 0; i < cnt; i++)
   {
     OfflineRecord rec;
@@ -2300,9 +2743,17 @@ bool nvsSyncToServer()
     o["timestamp"] = rec.timestamp;
     o["device_id"] = rec.deviceId;
     o["sync_mode"] = true;
+    idxOf[sentCnt] = i;
+    sentMask |= (1ULL << i);
     sentCnt++;
   }
+  if (sentCnt == 0)
+  {
+    http.end();
+    return nvsCompactAfterSync(0, cnt);
+  }
   String payload;
+  payload.reserve(measureJson(doc) + 1); // satu alokasi
   serializeJson(doc, payload);
   doc.clear();
   esp_task_wdt_reset();
@@ -2314,50 +2765,27 @@ bool nvsSyncToServer()
     String body = http.getString();
     esp_task_wdt_reset();
     http.end();
-    JsonDocument res;
-    DeserializationError parseErr = deserializeJson(res, body);
-    bool serverConfirmed = false;
-    if (parseErr == DeserializationError::Ok && res["data"].is<JsonArray>())
-    {
-      JsonArray resultArr = res["data"].as<JsonArray>();
-      if ((int)resultArr.size() == sentCnt)
-      {
-        serverConfirmed = true;
-        for (JsonObject item : resultArr)
-        {
-          const char *st = item["status"] | "error";
-          if (strcmp(st, "error") == 0)
-          {
-            appendFailedLogToSD(item["rfid"] | "unknown", item["timestamp"] | "unknown", item["message"] | "UNKNOWN");
-          }
-        }
-      }
-    }
-    if (!serverConfirmed)
+    uint64_t retryMask = 0;
+    if (!parseSyncReply(body, sentCnt, &retryMask))
     {
       appendFailedLogToSD("BATCH", "NVS_BUFFER", "RESPONSE_TIDAK_VALID_ATAU_TERPOTONG");
       return false;
     }
-    return nvsCompactAfterSync(cnt);
+    isOnline = true;
+    for (int j = 0; j < sentCnt; j++)
+      if ((retryMask >> j) & 1ULL)
+        sentMask &= ~(1ULL << idxOf[j]);
+    return nvsCompactAfterSync(sentMask, cnt);
   }
   http.end();
   return false;
 }
+
 // Penghitung gagal berurutan per endpoint polling. Hanya diakses dari taskSync (dan reset saat reconnect).
 static uint8_t failOta = 0;
 static uint8_t failDb = 0;
 static uint8_t failTelemetry = 0;
 static uint8_t failConfig = 0;
-
-// Interval dasar dikali 2^gagal, dibatasi. Aman terhadap overflow walau interval dari server besar.
-static unsigned long backoffInterval(unsigned long base, uint8_t fails)
-{
-  uint8_t s = (fails > BACKOFF_MAX_SHIFT) ? BACKOFF_MAX_SHIFT : fails;
-  unsigned long cap = (base > BACKOFF_MAX_INTERVAL_MS) ? base : BACKOFF_MAX_INTERVAL_MS;
-  if (base > (cap >> s))
-    return cap;
-  return base << s;
-}
 
 static void backoffFail(uint8_t &f)
 {
@@ -2665,6 +3093,7 @@ void checkAndUpdateRfidDb()
   if (!downloadRfidDb())
     backoffFail(failDb);
 }
+
 void sendTelemetry()
 {
   if (isSignalWeak())
@@ -2679,13 +3108,9 @@ void sendTelemetry()
   http.setConnectTimeout(5000);
   char url[API_URL_BUF];
   if (!buildApiUrl(url, sizeof(url), "/api/presensi/heartbeat"))
-  {
     return;
-  }
   if (!http.begin(client, url))
-  {
     return;
-  }
   http.addHeader(F("Content-Type"), F("application/json"));
   http.addHeader(F("X-API-KEY"), apiKey);
   JsonDocument doc;
@@ -2701,14 +3126,37 @@ void sendTelemetry()
   doc["rfid_db_entries"] = rfidCacheCount;
   doc["rfid_db_discarded"] = rfidCacheDiscarded;
   doc["online"] = isOnline;
+  doc["reset_reason"] = resetReasonName((esp_reset_reason_t)diagResetReason);
+  doc["last_abnormal"] = resetReasonName((esp_reset_reason_t)diagLastAbnormal);
+  doc["boot_count"] = diagBootCount;
+  doc["abnormal_count"] = diagAbnormalCount;
+  doc["heap_min"] = (uint32_t)esp_get_minimum_free_heap_size();
+  doc["heap_max_block"] = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  doc["stk_loop"] = taskStackHwm(hTaskLoop);
+  doc["stk_rfid"] = taskStackHwm(hTaskRfid);
+  doc["stk_sync"] = taskStackHwm(hTaskSync);
+  doc["stk_disp"] = taskStackHwm(hTaskDisplay);
+  doc["rc522_ok"] = rfidReady;
+  LOG_I("[DIAG] heap=%u min=%u blk=%u stk L/R/S/D=%u/%u/%u/%u\n",
+        (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        (unsigned)taskStackHwm(hTaskLoop), (unsigned)taskStackHwm(hTaskRfid),
+        (unsigned)taskStackHwm(hTaskSync), (unsigned)taskStackHwm(hTaskDisplay));
   String payload;
+  payload.reserve(measureJson(doc) + 1);
   serializeJson(doc, payload);
   int code = http.POST(payload);
   http.end();
   if (code >= 200 && code < 300)
+  {
     failTelemetry = 0;
+    isOnline = true;
+  }
   else
+  {
     backoffFail(failTelemetry);
+    isOnline = false;
+  }
 }
 
 // Default firmware untuk remote config. Dipakai saat server tidak mengirim field atau mengirim null.
@@ -2730,7 +3178,7 @@ static unsigned long jsonIntervalOrDefault(JsonVariantConst v, unsigned long def
   if (v.isNull() || !v.is<unsigned long>())
     return def;
   unsigned long x = v.as<unsigned long>();
-  return (x >= 5000UL) ? x : def;
+  return (x >= CFG_INTERVAL_MIN_MS && x <= CFG_INTERVAL_MAX_MS) ? x : def;
 }
 
 static bool sameRuntimeConfig(const RuntimeConfig &a, const RuntimeConfig &b)
@@ -2794,9 +3242,9 @@ void fetchRemoteConfig()
   next.syncIntervalMs = jsonIntervalOrDefault(doc["sync_interval_ms"], kRuntimeDefaults.syncIntervalMs);
   next.otaCheckIntervalMs = jsonIntervalOrDefault(doc["ota_check_interval_ms"], kRuntimeDefaults.otaCheckIntervalMs);
   if (next.sleepStartHour == next.sleepEndHour)
-    Serial.println("[CFG] jendela sleep kosong (mulai == selesai): sleep nonaktif");
+    LOG_W("[CFG] jendela sleep kosong (mulai == selesai): sleep nonaktif\n");
   if (next.dimStartHour == next.dimEndHour)
-    Serial.println("[CFG] jendela dim kosong (mulai == selesai): dim nonaktif");
+    LOG_W("[CFG] jendela dim kosong (mulai == selesai): dim nonaktif\n");
   if (!xConfigMutex || xSemaphoreTake(xConfigMutex, pdMS_TO_TICKS(500)) != pdTRUE)
     return;
   bool changed = !sameRuntimeConfig(rtCfg, next);
@@ -2808,32 +3256,6 @@ void fetchRemoteConfig()
     persistRuntimeConfigToNvs(next);
 }
 
-static int compareFirmwareVersion(const char *a, const char *b)
-{
-  int aMaj = 0, aMin = 0, aPat = 0;
-  int bMaj = 0, bMin = 0, bPat = 0;
-  sscanf(a, "%d.%d.%d", &aMaj, &aMin, &aPat);
-  sscanf(b, "%d.%d.%d", &bMaj, &bMin, &bPat);
-  if (aMaj != bMaj)
-    return (aMaj < bMaj) ? -1 : 1;
-  if (aMin != bMin)
-    return (aMin < bMin) ? -1 : 1;
-  if (aPat != bPat)
-    return (aPat < bPat) ? -1 : 1;
-  return 0;
-}
-// MD5 wajib 32 karakter hex. Dipakai untuk menolak update tanpa checksum.
-static bool isValidMd5Hex(const char *s)
-{
-  if (s == nullptr || strlen(s) != 32)
-    return false;
-  for (int i = 0; i < 32; i++)
-  {
-    if (!isxdigit((unsigned char)s[i]))
-      return false;
-  }
-  return true;
-}
 // Ambil host dari URL (huruf kecil, tanpa port/path). false jika bukan format scheme://host.
 static bool extractUrlHost(const char *url, char *out, size_t outSz)
 {
@@ -2890,7 +3312,7 @@ void checkOtaUpdate()
   int code = http.POST(payload);
   if (code != 200)
   {
-    Serial.printf("[OTA] check HTTP %d\n", code);
+    LOG_I("[OTA] check HTTP %d\n", code);
     http.end();
     backoffFail(failOta);
     return;
@@ -2908,12 +3330,12 @@ void checkOtaUpdate()
   const char *ver = doc["version"] | "";
   const char *burl = doc["url"] | "";
   const char *md5 = doc["md5"] | "";
-  Serial.printf("[OTA] update=%d ver=%s md5len=%u url=%s\n", (int)hasUpdate, ver, (unsigned)strlen(md5), burl);
+  LOG_I("[OTA] update=%d ver=%s md5len=%u url=%s\n", (int)hasUpdate, ver, (unsigned)strlen(md5), burl);
   if (!hasUpdate || !strlen(ver) || !strlen(burl))
     return;
   if (!isValidMd5Hex(md5))
   {
-    Serial.println("[OTA] ditolak: md5 tidak valid");
+    LOG_W("[OTA] ditolak: md5 tidak valid\n");
     return;
   }
   if (strlen(burl) >= sizeof(otaState.url) || !isOtaUrlAllowed(burl))
@@ -2923,12 +3345,12 @@ void checkOtaUpdate()
   }
   if (otaRejectedVer[0] != '\0' && strcmp(ver, otaRejectedVer) == 0)
   {
-    Serial.println("[OTA] dilewati: versi ini pernah gagal verifikasi");
+    LOG_W("[OTA] dilewati: versi ini pernah gagal verifikasi\n");
     return;
   }
   if (compareFirmwareVersion(ver, FIRMWARE_VERSION) <= 0)
   {
-    Serial.println("[OTA] ditolak: versi tidak lebih baru");
+    LOG_W("[OTA] ditolak: versi tidak lebih baru\n");
     return;
   }
   strncpy(otaState.version, ver, sizeof(otaState.version) - 1);
@@ -2943,43 +3365,6 @@ void checkOtaUpdate()
   showOLED(F("UPDATE"), buf);
   playToneNotify();
   delay(2000);
-}
-
-static void otaVerFeed(OtaVerScan &s, const uint8_t *d, size_t n)
-{
-  static const char pre[] = "FWVER:";
-  for (size_t i = 0; i < n && !s.found; i++)
-  {
-    char c = (char)d[i];
-    if (s.st < 6)
-    {
-      if (c == pre[s.st])
-        s.st++;
-      else
-        s.st = (c == 'F') ? 1 : 0;
-      s.vl = 0;
-      continue;
-    }
-    if (c == ';')
-    {
-      s.ver[s.vl] = '\0';
-      int a, b, p;
-      if (s.vl > 0 && sscanf(s.ver, "%d.%d.%d", &a, &b, &p) == 3)
-        s.found = true;
-      else
-      {
-        s.st = 0;
-        s.vl = 0;
-      }
-    }
-    else if ((isdigit((unsigned char)c) || c == '.') && s.vl < sizeof(s.ver) - 1)
-      s.ver[s.vl++] = c;
-    else
-    {
-      s.st = 0;
-      s.vl = 0;
-    }
-  }
 }
 
 // Gagal OTA: tampilkan pesan, reset status, pulihkan WDT normal.
@@ -2998,14 +3383,11 @@ void performOtaUpdate()
 {
   if (!otaState.updateAvailable || isSignalWeak())
     return;
-
-  // Tolak update tanpa checksum. Tanpa MD5, image terpotong atau palsu bisa lolos.
   if (!isValidMd5Hex(otaState.md5))
   {
     otaAbort("MD5 TIDAK ADA", false);
     return;
   }
-
   char buf[20];
   snprintf(buf, sizeof(buf), "v%s", otaState.version);
   showOLED(F("UPDATE OTA"), buf);
@@ -3018,14 +3400,13 @@ void performOtaUpdate()
   applyTls(otaClient);
   HTTPClient http;
   http.setTimeout(60000);
-  http.useHTTP10(true); // hindari chunked encoding pada stream mentah
+  http.useHTTP10(true);
   if (!http.begin(otaClient, otaState.url))
   {
     otaAbort("URL ERR", false);
     return;
   }
   http.addHeader(F("X-API-KEY"), apiKey);
-
   int code = http.GET();
   if (code != 200)
   {
@@ -3034,10 +3415,8 @@ void performOtaUpdate()
     otaAbort(buf, false);
     return;
   }
-
-  int total = http.getSize(); // -1 jika server tidak mengirim Content-Length
+  int total = http.getSize();
   size_t updateSize = (total > 0) ? (size_t)total : UPDATE_SIZE_UNKNOWN;
-
   if (!Update.begin(updateSize))
   {
     http.end();
@@ -3052,7 +3431,6 @@ void performOtaUpdate()
   unsigned long lastDataAt = millis();
   bool ioError = false;
   OtaVerScan verScan;
-
   while (http.connected() && (total <= 0 || written < (size_t)total))
   {
     esp_task_wdt_reset();
@@ -3071,7 +3449,7 @@ void performOtaUpdate()
     }
     else
     {
-      if (millis() - lastDataAt > 30000UL) // stall: server diam > 30 detik
+      if (millis() - lastDataAt > 30000UL)
       {
         ioError = true;
         break;
@@ -3081,14 +3459,11 @@ void performOtaUpdate()
   }
   http.end();
 
-  // Ukuran tidak sesuai atau I/O gagal: batalkan, jangan finalize.
   if (ioError || (total > 0 && written != (size_t)total))
   {
     otaAbort("UNDUH TERPUTUS", true);
     return;
   }
-
-  // Versi di dalam image harus sama dengan yang ditawarkan server.
   if (!verScan.found)
   {
     strncpy(otaRejectedVer, otaState.version, sizeof(otaRejectedVer) - 1);
@@ -3097,13 +3472,11 @@ void performOtaUpdate()
   }
   if (strcmp(verScan.ver, otaState.version) != 0)
   {
-    Serial.printf("[OTA] versi image %s != server %s\n", verScan.ver, otaState.version);
+    LOG_W("[OTA] versi image %s != server %s\n", verScan.ver, otaState.version);
     strncpy(otaRejectedVer, otaState.version, sizeof(otaRejectedVer) - 1);
     otaAbort("VERSI BEDA", true);
     return;
   }
-
-  // Update.end() memverifikasi MD5 yang sudah di-set.
   if (!Update.end() || !Update.isFinished())
   {
     if (Update.getError() == UPDATE_ERROR_MD5)
@@ -3115,7 +3488,7 @@ void performOtaUpdate()
     }
     return;
   }
-
+  otaTrackAttempt(otaState.version); // dicatat sebelum restart; dibandingkan saat boot (deteksi rollback)
   showOLED(F("UPDATE OK"), "RESTART...");
   playToneSuccess();
   delay(2000);
@@ -3125,59 +3498,23 @@ void performOtaUpdate()
 
 bool readQueueFileLocked(const char *fn, OfflineRecord *recs, int *cnt, int maxCnt)
 {
+  *cnt = 0;
   if (!file.open(fn, O_RDONLY))
     return false;
-  *cnt = 0;
   time_t now = 0;
   bool nowValid = getEpochWithFallback(&now);
   char line[144];
   if (file.available())
-    file.fgets(line, sizeof(line));
+    file.fgets(line, sizeof(line)); // header
   while (file.available() && *cnt < maxCnt)
   {
     esp_task_wdt_reset();
     if (file.fgets(line, sizeof(line)) <= 0)
       break;
-    int len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-      line[--len] = '\0';
-    if (len < 10)
-      continue;
-    char *c1 = strchr(line, ',');
-    char *c2 = c1 ? strchr(c1 + 1, ',') : nullptr;
-    char *c3 = c2 ? strchr(c2 + 1, ',') : nullptr;
-    char *c4 = c3 ? strchr(c3 + 1, ',') : nullptr;
-    if (!c1 || !c2 || !c3)
-      continue;
-    int rl = c1 - line, tl = c2 - c1 - 1, dl = c3 - c2 - 1;
-    if (rl <= 0 || tl <= 0)
-      continue;
-    unsigned long recT = strtoul(c3 + 1, nullptr, 10);
-    if (c4)
-    {
-      char crcStr[4];
-      strncpy(crcStr, c4 + 1, 3);
-      crcStr[3] = '\0';
-      char rfidTmp[11];
-      memcpy(rfidTmp, line, min(rl, 10));
-      rfidTmp[min(rl, 10)] = '\0';
-      uint8_t expected = recordCrc8(rfidTmp, recT);
-      char expectedStr[3];
-      snprintf(expectedStr, sizeof(expectedStr), "%02X", expected);
-      if (strcmp(crcStr, expectedStr) != 0)
-        continue;
-    }
-    strncpy(recs[*cnt].rfid, line, min(rl, 10));
-    recs[*cnt].rfid[min(rl, 10)] = '\0';
-    strncpy(recs[*cnt].timestamp, c1 + 1, min(tl, 19));
-    recs[*cnt].timestamp[min(tl, 19)] = '\0';
-    strncpy(recs[*cnt].deviceId, c2 + 1, min(dl, 19));
-    recs[*cnt].deviceId[min(dl, 19)] = '\0';
-    recs[*cnt].unixTime = recT;
-    if (recs[*cnt].timestamp[0] == '\0')
-      continue; // jangan panggil appendFailedLogToSD saat mutex SD dipegang
-    if (!isRecordExpired(recs[*cnt].unixTime, now, nowValid))
-      (*cnt)++;
+    OfflineRecord tmp;
+    // Baris yang ditolak TIDAK dibuang di sini; quarantineRejectedLocked() mencatatnya sebelum file dihapus.
+    if (classifyQueueLine(line, &tmp, now, nowValid) == LINE_OK)
+      recs[(*cnt)++] = tmp;
   }
   file.close();
   return *cnt > 0;
@@ -3215,12 +3552,11 @@ static bool detachFromWriterLocked(const char *fn)
   selectSD(); // saveMetadataLocked() memanggil deselectSD() di akhir
   return true;
 }
+
 SyncFileResult syncQueueFile(const char *fn)
 {
   if (!sdCardAvailable || !isWifiConnected())
-  {
     return SYNC_FILE_NO_WIFI;
-  }
   OfflineRecord recs[MAX_RECORDS_PER_FILE];
   int validCnt = 0;
   if (!acquireSD())
@@ -3233,7 +3569,6 @@ SyncFileResult syncQueueFile(const char *fn)
     pendingCacheDirty = true;
     return SYNC_FILE_EMPTY;
   }
-  // Gagal membuka file = error SD, BUKAN file kosong (jangan hapus).
   FsFile probe;
   if (!probe.open(fn, O_RDONLY))
   {
@@ -3251,9 +3586,11 @@ SyncFileResult syncQueueFile(const char *fn)
   bool hasData = readQueueFileLocked(fn, recs, &validCnt, MAX_RECORDS_PER_FILE);
   if (!hasData || validCnt == 0)
   {
-    sd.remove(fn);
+    bool removed = removeQueueFileSafeLocked(fn, 0);
     deselectSD();
     releaseSD();
+    if (!removed)
+      return SYNC_FILE_HTTP_FAIL;
     pendingCacheDirty = true;
     return SYNC_FILE_EMPTY;
   }
@@ -3268,9 +3605,7 @@ SyncFileResult syncQueueFile(const char *fn)
   if (!buildApiUrl(url, sizeof(url), "/api/presensi/sync-bulk"))
     return SYNC_FILE_HTTP_FAIL;
   if (!http.begin(client, url))
-  {
     return SYNC_FILE_HTTP_FAIL;
-  }
   http.addHeader(F("Content-Type"), F("application/json"));
   http.addHeader(F("X-API-KEY"), apiKey);
   JsonDocument doc;
@@ -3284,6 +3619,7 @@ SyncFileResult syncQueueFile(const char *fn)
     o["sync_mode"] = true;
   }
   String payload;
+  payload.reserve(measureJson(doc) + 1);
   serializeJson(doc, payload);
   doc.clear();
   esp_task_wdt_reset();
@@ -3295,42 +3631,31 @@ SyncFileResult syncQueueFile(const char *fn)
     String body = http.getString();
     esp_task_wdt_reset();
     http.end();
-    JsonDocument res;
-    DeserializationError parseErr = deserializeJson(res, body);
-    bool serverConfirmed = false;
-    if (parseErr == DeserializationError::Ok && res["data"].is<JsonArray>())
-    {
-      JsonArray resultArr = res["data"].as<JsonArray>();
-      if ((int)resultArr.size() == validCnt)
-      {
-        serverConfirmed = true;
-        for (JsonObject item : resultArr)
-        {
-          const char *st = item["status"] | "error";
-          if (strcmp(st, "error") == 0)
-          {
-            appendFailedLogToSD(item["rfid"] | "unknown",
-                                item["timestamp"] | "unknown",
-                                item["message"] | "UNKNOWN");
-          }
-        }
-      }
-    }
-    if (!serverConfirmed)
+    uint64_t retryMask = 0;
+    if (!parseSyncReply(body, validCnt, &retryMask))
     {
       appendFailedLogToSD("BATCH", fn, "RESPONSE_TIDAK_VALID_ATAU_TERPOTONG");
       return SYNC_FILE_HTTP_FAIL;
     }
+    isOnline = true;
+    int kept = __builtin_popcountll(retryMask);
     if (!acquireSD())
       return SYNC_FILE_HTTP_FAIL;
     selectSD();
-    sd.remove(fn);
+    bool removed = (retryMask == 0) ? removeQueueFileSafeLocked(fn, validCnt)
+                                    : keepRetryRecordsLocked(fn, validCnt, retryMask);
     deselectSD();
     releaseSD();
-    queueMutations++;
+    if (!removed)
+    {
+      appendFailedLogToSD("BATCH", fn, "KARANTINA_GAGAL_FILE_DIPERTAHANKAN");
+      return SYNC_FILE_HTTP_FAIL;
+    }
+    queueMutations = queueMutations + 1;
     pendingCacheDirty = true;
-    if (cachedPendingRecords >= validCnt)
-      cachedPendingRecords -= validCnt;
+    int done = validCnt - kept;
+    if (cachedPendingRecords >= done)
+      cachedPendingRecords -= done;
     else
       cachedPendingRecords = 0;
     return SYNC_FILE_OK;
@@ -3343,6 +3668,7 @@ SyncFileResult syncQueueFile(const char *fn)
   }
   return SYNC_FILE_HTTP_FAIL;
 }
+
 bool syncQueueFileWithRetry(const char *fn)
 {
   bool result = false;
@@ -3370,15 +3696,15 @@ bool syncQueueFileWithRetry(const char *fn)
       char buf[20];
       snprintf(buf, sizeof(buf), "RETRY %d/%d...", attempt + 1, MAX_SYNC_RETRIES);
       showOLED(F("SYNC ULANG"), buf);
-      unsigned long end = millis() + SYNC_RETRY_DELAY_MS * (1UL << attempt);
-      while (millis() < end)
+      unsigned long t0 = millis(), waitMs = SYNC_RETRY_DELAY_MS * (1UL << attempt);
+      while (millis() - t0 < waitMs) // aman terhadap wrap millis
       {
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(100));
       }
     }
   }
-  syncingQueueFile = -1; // satu pintu keluar: selalu dibersihkan
+  syncingQueueFile = -1;
   return result;
 }
 void chunkedSync()
@@ -3422,13 +3748,16 @@ void chunkedSync()
     syncState.currentFile = idx;
     getQueueFileName(idx, fn, sizeof(fn));
     int nRecs = countValidRecordsInFileLocked(fn);
+
     if (nRecs == 0)
     {
       if (idx != currentQueueFile) // file tulis aktif yang masih kosong dibiarkan
       {
-        sd.remove(fn);
-        pendingCacheDirty = true;
-        syncState.filesProcessed++;
+        if (removeQueueFileSafeLocked(fn, 0))
+        {
+          pendingCacheDirty = true;
+          syncState.filesProcessed++;
+        }
       }
       deselectSD();
       releaseSD();
@@ -3481,7 +3810,7 @@ void chunkedSync()
 static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
 {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
-    Serial.printf("[WIFI] disconnect reason=%d\n", (int)info.wifi_sta_disconnected.reason);
+    LOG_I("[WIFI] disconnect reason=%d\n", (int)info.wifi_sta_disconnected.reason);
 }
 bool connectToWifi(int ssidIdx)
 {
@@ -3522,7 +3851,6 @@ bool connectToWifi(int ssidIdx)
     char buf[20];
     snprintf(buf, sizeof(buf), "RSSI: %d dBm", (int)WiFi.RSSI());
     showOLED(F("WIFI OK"), buf);
-    isOnline = true;
     currentSsidIdx = ssidIdx;
     delay(1500);
     return true;
@@ -3537,12 +3865,11 @@ bool connectToWiFi()
       return true;
   return false;
 }
+
 bool pingAPI()
 {
   if (isSignalCritical())
-  {
     return false;
-  }
   vTaskDelay(pdMS_TO_TICKS(1000));
   WiFiClientSecure client;
   applyTls(client);
@@ -3551,26 +3878,19 @@ bool pingAPI()
   http.setConnectTimeout(10000);
   char url[API_URL_BUF];
   if (!buildApiUrl(url, sizeof(url), "/api/presensi/ping"))
-  {
     return false;
-  }
   if (!http.begin(client, url))
-  {
     return false;
-  }
   http.addHeader(F("Content-Type"), F("application/json"));
   http.addHeader(F("X-API-KEY"), apiKey);
   esp_task_wdt_reset();
   int code = http.GET();
   esp_task_wdt_reset();
-  if (code > 0)
-  {
-    String body = http.getString();
-  }
   http.end();
   isOnline = (code == 200);
   return isOnline;
 }
+
 void processReconnect()
 {
   switch (reconnectState)
@@ -3578,18 +3898,12 @@ void processReconnect()
   case RECONNECT_IDLE:
     if (!isWifiConnected())
     {
+      isOnline = false; // tanpa WiFi, server pasti tak terjangkau
       unsigned long elapsed = millis() - timers.lastReconnect;
       if (elapsed >= RECONNECT_INTERVAL)
       {
         timers.lastReconnect = millis();
         reconnectState = RECONNECT_INIT;
-      }
-    }
-    else
-    {
-      if (!isOnline)
-      {
-        isOnline = true;
       }
     }
     break;
@@ -3622,8 +3936,8 @@ void processReconnect()
       reconnectState = RECONNECT_FAILED;
     break;
   case RECONNECT_SUCCESS:
-    isOnline = true;
-    resetPollBackoff(); // jaringan baru pulih: kembali ke interval normal
+    resetPollBackoff();       // jaringan baru pulih: kembali ke interval normal
+    timers.lastTelemetry = 0; // heartbeat segera, agar status server cepat terisi
     if (!isSignalCritical())
     {
       syncTimeWithFallback();
@@ -3682,13 +3996,10 @@ void urlEncode(const char *src, char *dst, size_t dstSize)
   }
   dst[di] = '\0';
 }
-
 bool kirimLangsung(const char *rfid, const char *ts, char *msg)
 {
   if (!isWifiConnected())
-  {
     return false;
-  }
   WiFiClientSecure client;
   applyTls(client);
   HTTPClient http;
@@ -3697,10 +4008,12 @@ bool kirimLangsung(const char *rfid, const char *ts, char *msg)
   char url[API_URL_BUF];
   if (!buildApiUrl(url, sizeof(url), "/api/presensi"))
   {
+    strcpy(msg, "SERVER ERR 0");
     return false;
   }
   if (!http.begin(client, url))
   {
+    strcpy(msg, "SERVER ERR 0");
     return false;
   }
   http.addHeader(F("Content-Type"), F("application/json"));
@@ -3710,6 +4023,7 @@ bool kirimLangsung(const char *rfid, const char *ts, char *msg)
            "{\"rfid\":\"%s\",\"timestamp\":\"%s\",\"device_id\":\"%s\",\"sync_mode\":false}",
            rfid, ts, deviceId);
   int code = http.POST(payload);
+  String body = (code == 400) ? http.getString() : String();
   http.end();
   if (code == 200)
   {
@@ -3718,6 +4032,21 @@ bool kirimLangsung(const char *rfid, const char *ts, char *msg)
   }
   if (code == 400)
   {
+    JsonDocument d;
+    const char *c = "";
+    if (deserializeJson(d, body) == DeserializationError::Ok)
+      c = d["code"] | "";
+    if (!strcmp(c, "TS_FUTURE") || !strcmp(c, "TS_TOO_OLD"))
+    {
+      strcpy(msg, "JAM DEVICE SALAH");
+      timers.lastTimeSync = millis() - TIME_SYNC_INTERVAL; // jatuh tempo sekarang, aman terhadap wrap
+      return false;
+    }
+    if (!strcmp(c, "TS_EXPIRED"))
+    {
+      strcpy(msg, "DATA KADALUARSA");
+      return false;
+    }
     strcpy(msg, "CUKUP SEKALI!");
     return false;
   }
@@ -3739,8 +4068,10 @@ bool isDuplicateScanRecent(const char *rfid, unsigned long t, const char *source
   bool dup = nvsIsRecentScan(rfid, t);
   return dup;
 }
+
 bool kirimPresensi(const char *rfid, char *msg)
 {
+  msg[0] = '\0';
   if (!isTimeValid())
   {
     strcpy(msg, "WAKTU INVALID");
@@ -3755,7 +4086,6 @@ bool kirimPresensi(const char *rfid, char *msg)
     strcpy(msg, "WAKTU INVALID");
     return false;
   }
-
 #if REJECT_SCAN_UNTRUSTED_TIME
   if (!isTimeTrusted())
   {
@@ -3763,7 +4093,6 @@ bool kirimPresensi(const char *rfid, char *msg)
     return false;
   }
 #endif
-
   const char *pathTag = sdCardAvailable ? "SD" : (isWifiConnected() ? "DIRECT_HTTP" : "OFFLINE_BUFFER");
   if (isDuplicateScanRecent(rfid, (unsigned long)now, pathTag))
   {
@@ -3783,7 +4112,6 @@ bool kirimPresensi(const char *rfid, char *msg)
       strcpy(msg, "RFID NONAKTIF");
       return false;
     }
-    // RFID_NO_DB: DB belum pernah diunduh. Tetap simpan ke antrean, server yang memvalidasi saat sync.
     SaveResult r = saveToQueue(rfid, ts, (unsigned long)now);
     switch (r)
     {
@@ -3798,10 +4126,9 @@ bool kirimPresensi(const char *rfid, char *msg)
     case SAVE_QUEUE_FULL:
       strcpy(msg, "QUEUE PENUH!");
       return false;
-    default:
-      timers.lastSDRedetect = 0; // percepat pengecekan kesehatan SD
-      strcpy(msg, "SD CARD ERROR");
-      return false;
+    default:                                                   // SAVE_SD_ERROR: lanjut ke HTTP/NVS
+      timers.lastSDRedetect = millis() - SD_REDETECT_INTERVAL; // cek kesehatan SD jatuh tempo sekarang
+      break;
     }
   }
   if (isWifiConnected())
@@ -3812,24 +4139,12 @@ bool kirimPresensi(const char *rfid, char *msg)
       nvsSaveLastScan(rfid, (unsigned long)now);
       return true;
     }
-    if (strcmp(msg, "CUKUP SEKALI!") == 0 || strcmp(msg, "RFID NONAKTIF") == 0 || strcmp(msg, "HARI LIBUR!") == 0)
+    if (strcmp(msg, "CUKUP SEKALI!") == 0 || strcmp(msg, "RFID NONAKTIF") == 0 ||
+        strcmp(msg, "HARI LIBUR!") == 0 || strcmp(msg, "JAM DEVICE SALAH") == 0 ||
+        strcmp(msg, "DATA KADALUARSA") == 0)
     {
       return false;
     }
-    if (nvsIsDuplicate(rfid, (unsigned long)now))
-    {
-      strcpy(msg, "CUKUP SEKALI!");
-      return false;
-    }
-    if (nvsSaveToBuffer(rfid, ts, (unsigned long)now))
-    {
-      nvsBumpScanCount();
-      nvsSaveLastScan(rfid, (unsigned long)now);
-      snprintf(msg, 32, "BUFFER %d/%d", nvsGetCount(), NVS_MAX_RECORDS);
-      return true;
-    }
-    strcpy(msg, "BUFFER PENUH!");
-    return false;
   }
   if (nvsIsDuplicate(rfid, (unsigned long)now))
   {
@@ -3852,7 +4167,7 @@ bool displayStateChanged()
 }
 void updateCurrentDisplayState()
 {
-  currentDisplay.isOnline = isWifiConnected();
+  currentDisplay.isOnline = isWifiConnected() && isOnline;
   struct tm ti;
   if (!isTimeTrusted())
     strcpy(currentDisplay.time, "--:--"); // penanda: jam belum tepercaya
@@ -3904,7 +4219,7 @@ void updateStandbyDisplay()
   {
     display.print(currentDisplay.isOnline ? F("ONLINE") : F("OFFLINE"));
   }
-  const char *tap = "TAP KARTU";
+  const char *tap = rfidReady ? "TAP KARTU" : "RC522 RUSAK";
   int16_t x, y;
   uint16_t w, h;
   display.getTextBounds(tap, 0, 0, &x, &y, &w, &h);
@@ -3936,6 +4251,7 @@ void updateStandbyDisplay()
   xSemaphoreGive(xDisplayMutex);
   memcpy(&previousDisplay, &currentDisplay, sizeof(DisplayState));
 }
+
 void showStartupAnimation()
 {
   static const char title[] = "ZEDLABS";
@@ -4440,18 +4756,18 @@ void taskRfid(void *param)
     esp_task_wdt_reset();
     if (sleepRequested)
     {
+      parkRfid = true;
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    parkRfid = false;
     RfidScanEvent ev;
     if (xQueueReceive(xRfidQueue, &ev, pdMS_TO_TICKS(10)) == pdTRUE)
     {
       char rfidBuf[11];
       uidToString(ev.uid, ev.uidLen, rfidBuf);
       if (strcmp(rfidBuf, lastUID) == 0 && millis() - timers.lastScan < DEBOUNCE_TIME)
-      {
         continue;
-      }
       strcpy(lastUID, rfidBuf);
       timers.lastScan = millis();
       bool wasOff = !oledIsOn;
@@ -4470,7 +4786,10 @@ void taskRfid(void *param)
         showOLED(ok ? F("BERHASIL") : F("INFO"), msg);
         ok ? playToneSuccess() : playToneError();
       }
-      rfidFeedback = {true, millis(), wasOff};
+      rfidFeedback.shownAt = millis();
+      rfidFeedback.wasOledOff = wasOff;
+      __asm__ volatile("" ::: "memory"); // `active` ditulis terakhir
+      rfidFeedback.active = true;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -4485,13 +4804,17 @@ void taskSync(void *param)
     esp_task_wdt_reset();
     if (sleepRequested)
     {
+      parkSync = true;
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    unsigned long now = millis();
+    parkSync = false;
     RuntimeConfig cfg = getRuntimeConfigSnapshot();
     processReconnect();
     checkSDHealth();
+    // Diambil SETELAH processReconnect(): ia mengisi timers.lastSync = millis(),
+    // dan (now - lastSync) akan underflow bila now lebih lama.
+    unsigned long now = millis();
     if (isWifiConnected())
     {
       bool force = forceSyncRequested;
@@ -4499,7 +4822,7 @@ void taskSync(void *param)
         forceSyncRequested = false;
       if (!isSignalWeak())
       {
-        checkOtaUpdate(); // gating interval + backoff ada di dalam fungsi
+        checkOtaUpdate();
         checkAndUpdateRfidDb();
         if (otaState.updateAvailable && !rfidFeedback.active)
           performOtaUpdate();
@@ -4520,12 +4843,11 @@ void taskSync(void *param)
           refreshPendingCache();
           timers.lastSync = now;
           if (cachedPendingRecords > 0)
-          {
             chunkedSync();
-          }
         }
       }
     }
+    anchorTimeFromSystem();
     periodicTimeSync();
     vTaskDelay(pdMS_TO_TICKS(PERIODIC_CHECK_INTERVAL));
   }
@@ -4540,11 +4862,14 @@ void taskDisplay(void *param)
     esp_task_wdt_reset();
     if (sleepRequested)
     {
+      parkDisp = true;
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
+    parkDisp = false;
     unsigned long now = millis();
-    if (rfidFeedback.active && now - rfidFeedback.shownAt >= RFID_FEEDBACK_DISPLAY_MS)
+    // Selisih bertanda: shownAt bisa lebih baru dari `now` bila taskRfid menyela.
+    if (rfidFeedback.active && (long)(now - rfidFeedback.shownAt) >= (long)RFID_FEEDBACK_DISPLAY_MS)
     {
       rfidFeedback.active = false;
       if (rfidFeedback.wasOledOff)
@@ -4564,12 +4889,32 @@ void taskDisplay(void *param)
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
+
+static void logNvsStats()
+{
+  nvs_stats_t st;
+  if (nvs_get_stats(nullptr, &st) == ESP_OK)
+    LOG_I("[NVS] used=%u free=%u avail=%u total=%u ns=%u\n",
+          (unsigned)st.used_entries, (unsigned)st.free_entries,
+          (unsigned)st.available_entries, (unsigned)st.total_entries,
+          (unsigned)st.namespace_count);
+  else
+    LOG_E("[NVS] nvs_get_stats gagal\n");
+}
 void setup()
 {
+#if SLEEP_GPIO_HOLD
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis((gpio_num_t)PIN_SD_CS);
+  gpio_hold_dis((gpio_num_t)PIN_RFID_SS);
+#endif
   Serial.begin(115200);
-  Serial.printf("[FW] %s\n", FW_MARKER); // referensi nyata agar marker tidak dibuang linker
+#if SERIAL_TX_NONBLOCK
+  Serial.setTxTimeoutMs(0);
+#endif
+  Serial.printf("[FW] %s\n", FW_MARKER); // sengaja BUKAN LOG_I: referensi runtime marker, tetap ada saat LOG_LEVEL=0
   WiFi.onEvent(onWifiEvent);
-  setenv("TZ", "WIB-7", 1);
+  setenv("TZ", TZ_POSIX, 1);
   tzset();
   esp_task_wdt_deinit();
   const esp_task_wdt_config_t wdtCfg = {
@@ -4591,20 +4936,29 @@ void setup()
   xConfigMutex = xSemaphoreCreateMutex();
   xNvsMutex = xSemaphoreCreateMutex();
   xCacheMutex = xSemaphoreCreateMutex();
+  logNvsStats();
+  otaResolveAtBoot();
+  bootDiagRecord();
   xRfidQueue = xQueueCreate(RFID_QUEUE_LEN, sizeof(RfidScanEvent));
   uint8_t mac[6];
   WiFi.macAddress(mac);
   snprintf(deviceId, sizeof(deviceId), "ESP32_%02X%02X", mac[4], mac[5]);
   for (int i = 0; deviceId[i]; i++)
     deviceId[i] = toupper(deviceId[i]);
-  if (timeWasSynced && lastValidTime > 0 && sleepDurationSeconds > 0)
+
+  esp_reset_reason_t rr = esp_reset_reason();
+  if (rr == ESP_RST_DEEPSLEEP && timeWasSynced && lastValidTime > 0 && sleepDurationSeconds > 0)
   {
     lastValidTime += (time_t)sleepDurationSeconds;
     nvsSaveLastTime(lastValidTime);
+  }
+  sleepDurationSeconds = 0;
+  if (timeWasSynced && lastValidTime > 0)
+  {
     bootTime = millis();
     bootTimeSet = true;
-    sleepDurationSeconds = 0;
   }
+
   if (!timeWasSynced || lastValidTime == 0)
   {
     time_t saved = nvsLoadLastTime();
@@ -4614,10 +4968,17 @@ void setup()
       timeWasSynced = true;
       bootTime = millis();
       bootTimeSet = true;
-      timeFromNvsOnly = true; // lama mati tidak terhitung; RTC/NTP akan menjadikannya tepercaya
+      timeFromNvsOnly = true;
     }
   }
-  rtcInitAndApply(); // opsional: RTC valid menimpa estimasi waktu dari NVS
+  rtcInitAndApply();
+
+  {
+    time_t e = 0;
+    bool eok = getEpochWithFallback(&e);
+    LOG_I("[TIME] boot rr=%d sys=%lld lastValid=%lld est_ok=%d est=%lld\n",
+          (int)rr, (long long)time(nullptr), (long long)lastValidTime, (int)eok, (long long)e);
+  }
   isProvisioned = checkProvisioned();
   if (!isProvisioned)
   {
@@ -4637,9 +4998,7 @@ void setup()
   if (strlen(deviceName) > 0)
   {
     if (strlen(deviceName) > DEVICE_NAME_MAX_LEN)
-    {
       deviceName[DEVICE_NAME_MAX_LEN] = '\0';
-    }
     snprintf(deviceId, sizeof(deviceId), "%s", deviceName);
   }
   SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI);
@@ -4677,9 +5036,13 @@ void setup()
   }
   else
   {
-    showOLED(F("SD CARD"), "TIDAK ADA");
+    LOG_E("[SD] init gagal, sdErrorCode=0x%02X\n", (unsigned)sdInitErr);
+    if (sdInitErr == 0)
+      showOLED(F("SD FS RUSAK"), "FORMAT FAT32 DI PC");
+    else
+      showOLED(F("SD CARD"), "TIDAK TERBACA");
     playToneError();
-    delay(1000);
+    delay(1500);
     int nc = nvsGetCount();
     if (nc > 0)
     {
@@ -4696,13 +5059,28 @@ void setup()
   byte ver = rfidReader.PCD_ReadRegister(rfidReader.VersionReg);
   if (ver == 0x00 || ver == 0xFF)
   {
-    showOLED(F("RC522 GAGAL"), "RESTART...");
+    int fails = nvsGetI(NVS_KEY_RC_FAIL) + 1;
+    if (fails > MAX_RC522_RESTARTS + 1)
+      fails = MAX_RC522_RESTARTS + 1;
+    nvsSetIChanged(NVS_KEY_RC_FAIL, fails);
+    LOG_E("[RC522] versi=0x%02X gagal, percobaan %d\n", (unsigned)ver, fails);
+    if (fails <= MAX_RC522_RESTARTS)
+    {
+      showOLED(F("RC522 GAGAL"), "RESTART...");
+      playToneError();
+      delay(3000UL * fails);
+      ESP.restart();
+    }
+    rfidReady = false; // mode terdegradasi: WiFi, OTA, sync antrean tetap jalan
+    showOLED(F("RC522 RUSAK"), "MODE TERBATAS");
     playToneError();
-    delay(3000);
-    ESP.restart();
+    delay(2000);
   }
-  // Titik "sehat": konfigurasi terbaca, SD diinisialisasi, RC522 merespons.
-  // Kegagalan WiFi/NTP setelah ini bukan alasan rollback.
+  else
+  {
+    rfidReady = true;
+    nvsSetIChanged(NVS_KEY_RC_FAIL, 0);
+  }
   esp_ota_mark_app_valid_cancel_rollback();
   showProgress(F("CONNECTING WIFI"), 1500);
   bool wifiOk = connectToWiFi();
@@ -4763,9 +5141,7 @@ void setup()
         if (sv > lv)
           downloadRfidDb();
         else
-        {
           showOLED(F("RFID DB"), "UP TO DATE");
-        }
         delay(600);
         esp_task_wdt_reset();
       }
@@ -4782,7 +5158,7 @@ void setup()
     int retry = nvsGetBootRetry() + 1;
     if (retry <= MAX_BOOT_TIME_SYNC_RETRIES)
     {
-      nvsSetBootRetry(retry); // disimpan di NVS, bertahan di semua jenis reset
+      nvsSetBootRetry(retry);
       char buf[24];
       snprintf(buf, sizeof(buf), "RETRY %d/%d", retry, MAX_BOOT_TIME_SYNC_RETRIES);
       showOLED(F("WAKTU GAGAL SYNC"), buf);
@@ -4795,7 +5171,7 @@ void setup()
       showOLED(F("WAKTU TETAP GAGAL"), "LANJUT OFFLINE");
       playToneError();
       delay(2000);
-      nvsSetBootRetry(0); // boot berikutnya mencoba lagi dari awal
+      nvsSetBootRetry(0);
       bootTimeSyncFailed = true;
     }
   }
@@ -4814,7 +5190,7 @@ void setup()
   unsigned long now = millis();
   timers.lastSync = now;
   timers.lastTimeSync = now;
-  timers.lastReconnect = isOnline ? now : 0;
+  timers.lastReconnect = isWifiConnected() ? now : 0;
   timers.lastDisplayUpdate = now;
   timers.lastPeriodicCheck = now;
   timers.lastOLEDScheduleCheck = now;
@@ -4832,13 +5208,22 @@ void setup()
   xTaskCreatePinnedToCore(taskDisplay, "disp", TASK_DISPLAY_STACK, nullptr, TASK_DISPLAY_PRIORITY, &hTaskDisplay, 0);
 }
 
-// Polling RC522 harus eksklusif terhadap SD karena selectSD() memaksa
-// PIN_RFID_SS HIGH dan SD_CS LOW secara manual. Jika mutex sedang dipegang
-// task lain, lewati iterasi ini (dicoba lagi 10 ms kemudian).
 static void pollRfidReader()
 {
-  if (!acquireSD(pdMS_TO_TICKS(30)))
+  if (!rfidReady)
     return;
+  static uint32_t skips = 0;
+  static unsigned long lastLog = 0;
+  if (!acquireSD(pdMS_TO_TICKS(30)))
+  {
+    skips++;
+    if (millis() - lastLog >= 60000UL)
+    {
+      lastLog = millis();
+      LOG_W("[RFID] poll dilewati total=%lu (mutex SD sibuk)\n", (unsigned long)skips);
+    }
+    return;
+  }
   deselectSD();
   bool got = false;
   RfidScanEvent ev = {};
@@ -4858,14 +5243,28 @@ static void pollRfidReader()
     xQueueSend(xRfidQueue, &ev, 0);
 }
 
-static bool isInWindow(int h, int start, int end)
+static int calcSleepSeconds(const RuntimeConfig &cfg)
 {
-  if (start == end)
-    return false; // jendela kosong, jangan pernah tidur
-  if (start < end)
-    return h >= start && h < end; // tidak melewati tengah malam
-  return h >= start || h < end;   // melewati tengah malam (default 18-01)
+  time_t t;
+  if (!getEpochWithFallback(&t))
+    return 60;
+  struct tm tn;
+  localtime_r(&t, &tn);
+  int h = tn.tm_hour;
+  int nowSec = tn.tm_hour * 3600 + tn.tm_min * 60 + tn.tm_sec;
+  int endSec;
+  if (cfg.sleepStartHour < cfg.sleepEndHour)
+    endSec = cfg.sleepEndHour * 3600;
+  else
+    endSec = (h >= cfg.sleepStartHour) ? cfg.sleepEndHour * 3600 + 86400 : cfg.sleepEndHour * 3600;
+  int s = endSec - nowSec;
+  if (s < 60)
+    s = 60;
+  if (s > 43200)
+    s = 43200;
+  return s;
 }
+
 void loop()
 {
   esp_task_wdt_reset();
@@ -4877,36 +5276,34 @@ void loop()
     int h = ti.tm_hour;
     if (isInWindow(h, cfg.sleepStartHour, cfg.sleepEndHour))
     {
-      if (syncState.inProgress || otaInProgress)
+      static bool sleepFailed = false;
+      static unsigned long lastSleepFail = 0;
+      if ((sleepFailed && millis() - lastSleepFail < SLEEP_RETRY_MS) || syncState.inProgress || otaInProgress)
       {
         vTaskDelay(pdMS_TO_TICKS(10));
         return;
       }
       sleepRequested = true;
       unsigned long waitStart = millis();
-      while (millis() - waitStart < DEEP_SLEEP_TASK_WAIT_MS)
+      while (millis() - waitStart < SLEEP_PARK_TIMEOUT_MS && !(parkRfid && parkSync && parkDisp))
       {
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(100));
       }
-      flushAllFiles();
+      if (!(parkRfid && parkSync && parkDisp) || !flushAllFiles())
+      {
+        LOG_W("[SLEEP] dibatalkan: task belum berhenti atau flush SD gagal\n");
+        sleepRequested = false;
+        sleepFailed = true;
+        lastSleepFail = millis();
+        return;
+      }
+      sleepFailed = false;
       showOLED(F("SLEEP MODE"), "...");
       delay(1000);
-      int nowSec = ti.tm_hour * 3600 + ti.tm_min * 60 + ti.tm_sec;
-      int endSec;
-      if (cfg.sleepStartHour < cfg.sleepEndHour)
-        endSec = cfg.sleepEndHour * 3600; // jendela tidak melewati tengah malam
-      else
-        endSec = (h >= cfg.sleepStartHour)
-                     ? cfg.sleepEndHour * 3600 + 86400
-                     : cfg.sleepEndHour * 3600;
-      int sleepSec = endSec - nowSec;
-      if (sleepSec < 60)
-        sleepSec = 60;
-      if (sleepSec > 43200)
-        sleepSec = 43200;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%dj %dm", sleepSec / 3600, (sleepSec % 3600) / 60);
+      int shown = calcSleepSeconds(cfg);
+      snprintf(buf, sizeof(buf), "%dj %dm", shown / 3600, (shown % 3600) / 60);
       showOLED(F("SLEEP FOR"), buf);
       delay(2000);
       if (xSemaphoreTake(xDisplayMutex, pdMS_TO_TICKS(500)) == pdTRUE)
@@ -4915,6 +5312,18 @@ void loop()
         display.display();
         display.ssd1306_command(SSD1306_DISPLAYOFF);
         xSemaphoreGive(xDisplayMutex);
+      }
+      int sleepSec = calcSleepSeconds(cfg); // dihitung ulang tepat sebelum tidur
+      {
+        time_t t;
+        if (getEpochWithFallback(&t))
+        {
+          lastValidTime = t;
+          bootTime = millis();
+          bootTimeSet = true;
+          timeWasSynced = true;
+          nvsSaveLastTime(t);
+        }
       }
       sleepDurationSeconds = (uint64_t)sleepSec;
       if (acquireSD(pdMS_TO_TICKS(500)))
@@ -4933,6 +5342,13 @@ void loop()
       if (hTaskDisplay)
         esp_task_wdt_delete(hTaskDisplay);
       esp_task_wdt_deinit();
+#if SLEEP_GPIO_HOLD
+      digitalWrite(PIN_SD_CS, HIGH);
+      digitalWrite(PIN_RFID_SS, HIGH);
+      gpio_hold_en((gpio_num_t)PIN_SD_CS);
+      gpio_hold_en((gpio_num_t)PIN_RFID_SS);
+      gpio_deep_sleep_hold_en();
+#endif
       esp_sleep_enable_timer_wakeup((uint64_t)sleepSec * 1000000ULL);
       esp_deep_sleep_start();
     }

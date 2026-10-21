@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
+# tools/verify-certs-v2.sh  (ASUMSI: blok PEM di .ino berada dalam raw string R"EOF(...)EOF")
 set -euo pipefail
-INO=attendance-machine.ino
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+INO="${1:-attendance-machine.ino}"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-# Pecah blok TLS_ROOT_CA di .ino menjadi satu file per sertifikat
-awk '/TLS_ROOT_CA\[\] PROGMEM/{f=1;next} f&&/^\)EOF"/{f=0} f' "$INO" \
- | awk -v d="$T" '/-----BEGIN CERTIFICATE-----/{n++} n{print > (d "/ino-" n ".pem")}'
+# Pisahkan semua blok PEM dari .ino menjadi file terpisah
+awk -v d="$TMP" '
+  /-----BEGIN CERTIFICATE-----/ {n++; f=sprintf("%s/ino_%02d.pem", d, n); on=1}
+  on {print > f}
+  /-----END CERTIFICATE-----/ {on=0; close(f)}
+' "$INO"
 
 fp() { openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2; }
-for f in "$T"/ino-*.pem;  do fp "$f"; done | sort > "$T/ino.fp"
-for f in certs/*.pem;     do fp "$f"; done | sort > "$T/files.fp"
 
-echo "== sertifikat di .ino ($(wc -l < "$T/ino.fp")) vs certs/ ($(wc -l < "$T/files.fp"))"
-if diff "$T/ino.fp" "$T/files.fp"; then echo "OK: identik"; else echo "BEDA"; exit 1; fi
+echo "== Fingerprint di .ino =="
+for f in "$TMP"/ino_*.pem; do echo "$(basename "$f")  $(fp "$f")"; done
 
-echo "== subjek dan masa berlaku"
+echo "== Fingerprint di certs/ =="
+for f in certs/*.pem; do echo "$f  $(fp "$f")"; done
+
+echo "== Pencocokan =="
+rc=0
 for f in certs/*.pem; do
-  echo "-- $f"
-  openssl x509 -in "$f" -noout -subject -enddate
-  openssl x509 -in "$f" -noout -checkend $((730*86400)) >/dev/null \
-    && echo "   sisa > 2 tahun" || echo "   PERINGATAN: kedaluwarsa < 2 tahun"
+  want="$(fp "$f")"; hit=0
+  for g in "$TMP"/ino_*.pem; do [ "$(fp "$g")" = "$want" ] && hit=1; done
+  if [ $hit -eq 1 ]; then echo "OK    $f ada di .ino"; else echo "BEDA  $f TIDAK ada di .ino"; rc=1; fi
 done
+
+echo "== Kedaluwarsa =="
+for f in certs/*.pem; do
+  openssl x509 -in "$f" -noout -subject -enddate
+  if openssl x509 -in "$f" -noout -checkend $((90*86400)); then echo "  >90 hari lagi"; else echo "  PERINGATAN: <90 hari"; rc=1; fi
+done
+exit $rc

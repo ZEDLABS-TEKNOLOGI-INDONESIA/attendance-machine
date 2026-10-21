@@ -8,3 +8,4 @@ release/*.merged.bin
 queue_*.csv
 build.log
 build/
+SKILLS.md

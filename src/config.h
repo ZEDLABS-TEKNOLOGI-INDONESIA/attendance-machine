@@ -1,16 +1,4 @@
 #pragma once
-/*
- * ATTENDANCE MACHINE
- * Device           : ESP32-C3 Super Mini
- * Tools            : Arduino IDE 2.3.6
- * Environtment     : v3.3.12
- * Schema Partition : Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS)
- * Author           : Yahya Zulfikri
- * Created          : Juli 2025
- * Updated          : Oktober 2026
- * Version          : 2.3.8
- */
-
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>

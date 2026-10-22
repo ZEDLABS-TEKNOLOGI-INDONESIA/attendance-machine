@@ -27,6 +27,6 @@ done
 echo "== Kedaluwarsa =="
 for f in certs/*.pem; do
   openssl x509 -in "$f" -noout -subject -enddate
-  if openssl x509 -in "$f" -noout -checkend $((90*86400)); then echo "  >90 hari lagi"; else echo "  PERINGATAN: <90 hari"; rc=1; fi
+  if openssl x509 -in "$f" -noout -checkend $((365*86400)); then echo "  >365 hari lagi"; else echo "  PERINGATAN: <365 hari"; rc=1; fi
 done
 exit $rc

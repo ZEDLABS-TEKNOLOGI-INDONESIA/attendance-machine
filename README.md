@@ -68,7 +68,7 @@ arduino-cli compile ... --build-property compiler.cpp.extra_flags=-DLOG_LEVEL=0
 g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I. test/test_pure.cpp -o /tmp/test_pure && /tmp/test_pure
 ```
 
-**Ukuran v2.3.7:** 1.343.521 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%). v2.3.6 adalah 1.332.096 byte.
+**Ukuran v2.3.7:** 1.343.521 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%). v2.3.9 adalah 1.332.096 byte.
 
 Warning dari library (`#warning File not defined because __has_include(FS.h)`, `"FILE_READ" redefined`, `"FILE_WRITE" redefined`) berasal dari tabrakan makro SdFat dan `FS.h` (ditarik `WebServer.h`). Aman diabaikan. Warning lain yang muncul berarti ada masalah di kode kita.
 
@@ -456,7 +456,7 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 
 ## 14. Status Verifikasi
 
-**Terbukti:** build bersih tanpa warning milik kode kita, unit test 71/71, OTA 2.3.6 berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar.
+**Terbukti:** build bersih tanpa warning milik kode kita, unit test 71/71, OTA 2.3.9 berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar.
 
 **Belum diuji di perangkat** (pilot v2.3.7 menutupnya):
 - **28** WDT 180 detik saat sync backlog di `setup()` (log `[WDT] timeout 180000 ms` lalu `90000 ms`).

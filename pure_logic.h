@@ -1,4 +1,3 @@
-// pure_logic.h : logika murni tanpa Arduino/FreeRTOS, dapat dikompilasi di PC.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -10,12 +9,15 @@
 #ifndef CRC8_POLY
 #define CRC8_POLY 0x07
 #endif
+
 #ifndef BACKOFF_MAX_SHIFT
 #define BACKOFF_MAX_SHIFT 4
 #endif
+
 #ifndef BACKOFF_MAX_INTERVAL_MS
 #define BACKOFF_MAX_INTERVAL_MS 3600000UL
 #endif
+
 #ifndef MAX_QUEUE_FILES
 #define MAX_QUEUE_FILES 60000
 #endif
@@ -39,6 +41,7 @@ static inline uint8_t crc8(const uint8_t *data, size_t len)
     }
     return crc;
 }
+
 static inline uint8_t recordCrc8(const char *rfid, uint32_t t)
 {
     uint8_t buf[14] = {0};
@@ -50,6 +53,7 @@ static inline uint8_t recordCrc8(const char *rfid, uint32_t t)
     buf[13] = (t) & 0xFF;
     return crc8(buf, 14);
 }
+
 static inline uint32_t backoffInterval(uint32_t base, uint8_t fails)
 {
     uint8_t s = (fails > BACKOFF_MAX_SHIFT) ? BACKOFF_MAX_SHIFT : fails;
@@ -58,6 +62,7 @@ static inline uint32_t backoffInterval(uint32_t base, uint8_t fails)
         return cap;
     return base << s;
 }
+
 static inline bool isInWindow(int h, int start, int end)
 {
     if (start == end)
@@ -66,6 +71,7 @@ static inline bool isInWindow(int h, int start, int end)
         return h >= start && h < end;
     return h >= start || h < end;
 }
+
 static inline int compareFirmwareVersion(const char *a, const char *b)
 {
     int aMaj = 0, aMin = 0, aPat = 0;
@@ -80,6 +86,7 @@ static inline int compareFirmwareVersion(const char *a, const char *b)
         return (aPat < bPat) ? -1 : 1;
     return 0;
 }
+
 static inline bool isValidMd5Hex(const char *s)
 {
     if (s == nullptr || strlen(s) != 32)
@@ -89,6 +96,7 @@ static inline bool isValidMd5Hex(const char *s)
             return false;
     return true;
 }
+
 static inline int64_t daysFromCivil(int y, unsigned m, unsigned d)
 {
     y -= (m <= 2);
@@ -98,6 +106,7 @@ static inline int64_t daysFromCivil(int y, unsigned m, unsigned d)
     const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
+
 static inline bool parseQueueIndex(const char *name, int *idx)
 {
     int n = -1;
@@ -110,6 +119,7 @@ static inline bool parseQueueIndex(const char *name, int *idx)
     *idx = n;
     return true;
 }
+
 static inline void otaVerFeed(OtaVerScan &s, const uint8_t *d, size_t n)
 {
     static const char pre[] = "FWVER:";

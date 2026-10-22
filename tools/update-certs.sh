@@ -4,11 +4,15 @@
 #   tools/update-certs.sh add <nama> <url|berkas> [--fp SHA256] [--dry-run]
 #   tools/update-certs.sh remove <nama> [--dry-run]
 #   tools/update-certs.sh sync [--dry-run]
+#   tools/update-certs.sh refresh [--offline] [--dry-run]
 #
 # add    : unduh (atau salin dari berkas lokal), validasi, simpan ke certs/<nama>.pem,
 #          lalu tulis ulang blok TLS_ROOT_CA di src/tls.h dari SEMUA certs/*.pem.
 # remove : hapus certs/<nama>.pem lalu tulis ulang blok TLS_ROOT_CA.
 # sync   : tulis ulang blok TLS_ROOT_CA dari certs/*.pem (mis. setelah edit manual).
+#
+# refresh: bandingkan tiap entri certs/sources.txt dengan sumber resminya (harus identik,
+#          selisih = berhenti), lalu sync. Dipakai otomatis oleh tools/build.sh.
 #
 # Skrip TIDAK menaikkan FIRMWARE_VERSION dan TIDAK mengompilasi.
 set -euo pipefail
@@ -73,6 +77,7 @@ sync_tls() {
   fi
   cat "$new" > "$TLS_H"
   echo "OK: $TLS_H diperbarui ($n sertifikat)."
+  [ "${QUIET:-0}" = 1 ] && return 0
   echo "--- verifikasi ---"
   bash tools/verify-certs.sh "$TLS_H" || warn "verify-certs.sh melaporkan masalah (lihat di atas)"
   echo
@@ -128,6 +133,10 @@ cmd_add() {
   mkdir -p "$CERT_DIR"
   cp "$pem" "$CERT_DIR/$name.pem"
   echo "Disimpan: $CERT_DIR/$name.pem"
+  if [[ "$src" == https://* ]]; then
+    echo "$name $src" >> "$CERT_DIR/sources.txt"
+    echo "Dicatat di $CERT_DIR/sources.txt (dipakai oleh 'refresh')."
+  fi
   sync_tls
 }
 
@@ -143,6 +152,7 @@ cmd_remove() {
     read -r -p "Ketik YA untuk melanjutkan: " ans
     [ "$ans" = "YA" ] || die "dibatalkan"
     rm "$CERT_DIR/$name.pem"
+    [ ! -f "$CERT_DIR/sources.txt" ] || sed -i "/^$name /d" "$CERT_DIR/sources.txt"
   else
     echo "Dry-run: berkas tidak dihapus, menampilkan hasil tanpa $name"
     return 0
@@ -150,9 +160,38 @@ cmd_remove() {
   sync_tls
 }
 
+cmd_refresh() {
+  local offline=0 a list="$CERT_DIR/sources.txt" name url raw pem
+  for a in "$@"; do
+    case "$a" in --offline) offline=1 ;; --dry-run) DRY=1 ;; *) die "opsi tidak dikenal: $a" ;; esac
+  done
+  if [ "$offline" -eq 0 ] && [ -f "$list" ] && command -v curl >/dev/null; then
+    while read -r name url _; do
+      [[ -z "${name:-}" || "$name" == \#* ]] && continue
+      [ -f "$CERT_DIR/$name.pem" ] || { warn "$name ada di sources.txt tetapi $CERT_DIR/$name.pem tidak ada"; continue; }
+      raw="$TMPD/r_$name"; pem="$TMPD/p_$name"
+      if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 20 -o "$raw" "$url" 2>/dev/null; then
+        warn "gagal mengunduh $name ($url); memakai salinan lokal"; continue
+      fi
+      if ! { openssl x509 -in "$raw" -out "$pem" 2>/dev/null || openssl x509 -inform DER -in "$raw" -out "$pem" 2>/dev/null; }; then
+        warn "$name: respons bukan sertifikat; memakai salinan lokal"; continue
+      fi
+      if [ "$(fp "$pem")" = "$(fp "$CERT_DIR/$name.pem")" ]; then
+        echo "OK    $name sama dengan sumber resmi"
+      else
+        die "$name: sertifikat di sumber resmi BERBEDA dari $CERT_DIR/$name.pem. Tinjau manual (bandingkan sidik jari di halaman resmi CA), lalu pakai 'remove' dan 'add'."
+      fi
+    done < "$list"
+  elif [ "$offline" -eq 0 ]; then
+    warn "tidak ada $list atau curl; hanya sync lokal"
+  fi
+  sync_tls
+}
+
 case "${1:-}" in
+  refresh) shift; cmd_refresh "$@" ;;
   add)    shift; cmd_add "$@" ;;
   remove) shift; cmd_remove "$@" ;;
   sync)   shift; [ "${1:-}" != "--dry-run" ] || DRY=1; sync_tls ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac

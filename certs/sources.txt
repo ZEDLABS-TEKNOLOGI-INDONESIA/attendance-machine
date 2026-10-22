@@ -1,0 +1,3 @@
+# nama url-resmi   (pin = isi certs/<nama>.pem yang ter-commit; sumber resmi harus identik)
+gtsr4 https://pki.goog/repo/certs/gtsr4.pem
+isrgx1 https://letsencrypt.org/certs/isrgrootx1.pem

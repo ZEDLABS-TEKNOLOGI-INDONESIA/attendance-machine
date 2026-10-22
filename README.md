@@ -46,9 +46,13 @@ attendance-machine/
 ├── attendance-machine.ino   # #include modul + setup(), loop(), pollRfidReader(), calcSleepSeconds()
 ├── src/                     # modul (tabel di bawah) + pure_logic.h
 ├── test/test_pure.cpp       # unit test host
+├── tools/
+│   ├── build.sh             # segarkan root CA, verifikasi, lalu compile
+│   ├── update-certs.sh      # kelola root CA: add / remove / sync / refresh
+│   ├── verify-certs.sh      # cocokkan certs/ dengan src/tls.h, cek kedaluwarsa
+│   └── gen.py               # generator antrean uji
+├── certs/                   # gtsr4.pem, isrgx1.pem, sources.txt
 ├── assets/provisioning.png
-├── tools/                   # gen.py, verify-certs.sh
-├── certs/                   # salinan root CA (gtsr4.pem, isrgx1.pem)
 └── README.md
 ```
 
@@ -108,7 +112,13 @@ attendance-machine/
 
 **Perintah:**
 ```bash
-# Compile
+# Compile (disarankan): segarkan root CA, verifikasi, lalu compile
+tools/build.sh
+
+# Rilis tanpa log serial
+tools/build.sh --build-property compiler.cpp.extra_flags=-DLOG_LEVEL=0
+
+# Compile langsung tanpa penyegaran sertifikat (setara isi tahap 3 build.sh)
 arduino-cli compile --clean --warnings all \
   --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=min_spiffs \
   --export-binaries .
@@ -119,15 +129,14 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc,Part
 # Wipe flash (opsional, membersihkan NVS/SPIFFS lama)
 esptool --chip esp32c3 --port /dev/ttyACM0 erase-flash
 
-# Rilis tanpa log serial
-arduino-cli compile ... --build-property compiler.cpp.extra_flags=-DLOG_LEVEL=0
-
 # Unit test host
 g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I. test/test_pure.cpp -o /tmp/test_pure && /tmp/test_pure
 
 # Verifikasi sertifikat tertanam vs certs/
 bash tools/verify-certs.sh
 ```
+
+`tools/build.sh` tidak dijalankan oleh Arduino IDE. Bila compile lewat IDE, penyegaran sertifikat dilewati.
 
 **Ukuran v2.3.8:** 1.343.571 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%).
 
@@ -152,7 +161,7 @@ Warning dari library (`#warning File not defined because __has_include(FS.h)`, `
    - `timeFromNvsOnly` diset di `setup()`. Jangan direset manual.
    - `MIN_VALID_EPOCH` harus selaras dengan `RTC_MIN_VALID_YEAR`.
 6. **Polling berkala** (OTA, versi DB, heartbeat, config) wajib memakai `backoffInterval(base, failX)`, `backoffFail()` saat gagal, dan reset ke 0 saat sukses. **Dilarang** memasang backoff di `chunkedSync`, `nvsSyncToServer`, `kirimLangsung`.
-7. **HTTPS:** setiap request membuat `WiFiClientSecure` sendiri lewat `applyTls()`. `TLS_VERIFY_CERT` harus tetap `1` di rilis.
+7. **HTTPS:** setiap request membuat `WiFiClientSecure` sendiri lewat `applyTls()`. `TLS_VERIFY_CERT` harus tetap `1` di rilis. Root CA di `src/tls.h` dikelola lewat `tools/update-certs.sh`, jangan diedit manual (lihat bagian 6).
 8. **Pola waktu millis:** gunakan `(now - t0) >= durasi` atau selisih bertanda `(long)(now - t)`. Jangan `millis() < end`.
 9. **Epoch yang dikirim ke server dan dihitung di CRC memakai `uint32`** (`unsigned long` di ESP32). `pure_logic.h` memakai `uint32_t` agar perilaku overflow identik di PC.
 10. **Logika murni** (tanpa Arduino/FreeRTOS) ada di `src/pure_logic.h` dan diuji di PC: `crc8`, `recordCrc8`, `backoffInterval`, `isInWindow`, `compareFirmwareVersion`, `isValidMd5Hex`, `daysFromCivil`, `parseQueueIndex`, `otaVerFeed`. Perubahan fungsi-fungsi itu wajib menjalankan `test/test_pure.cpp` (71 pemeriksaan).
@@ -466,7 +475,7 @@ Semua route di `/api/presensi`, dilindungi `api.secret` (header `X-API-KEY`) dan
 ## 12. Rilis Firmware (OTA)
 
 1. Naikkan `FIRMWARE_VERSION` **dan** komentar header (`Version`), keduanya di `src/config.h`. Perbarui README (versi, ukuran, changelog, bagian 15).
-2. Build bersih dengan `--warnings all --export-binaries`.
+2. Build bersih dengan `tools/build.sh` (menyegarkan root CA, `--warnings all`, `--export-binaries`). Hanya warning SdFat/`FS.h` yang boleh muncul.
 3. Marker dan checksum dari `.ino.bin` yang sama:
 ```bash
 BIN=build/esp32.esp32.esp32c3/attendance-machine.ino.bin
@@ -494,7 +503,7 @@ md5sum $BIN
 
 - **Unit test host:** `test/test_pure.cpp` (71 pemeriksaan: CRC, backoff, jendela sleep, semver, MD5, kalender, nama file antrean, marker versi, pola wrap millis). Wajib lulus sebelum rilis.
 - **Skrip antrean uji:** `tools/gen.py <jumlah_file>` (RFID `9xxxxxxxxx` tidak terdaftar, format dan CRC sama dengan firmware). **Jangan menyuntik antrean palsu ke server produksi**; pakai staging. Jalankan di luar folder sketch (hasilnya `queue_N.csv` di direktori kerja) dan jangan di-commit.
-- **Verifikasi sertifikat:** `bash tools/verify-certs.sh` membandingkan `certs/*.pem` dengan blok `TLS_ROOT_CA` di `src/tls.h` dan memperingatkan bila sisa masa berlaku < 90 hari.
+- **Sertifikat:** `bash tools/verify-certs.sh` membandingkan `certs/*.pem` dengan blok `TLS_ROOT_CA` di `src/tls.h` dan memperingatkan bila sisa masa berlaku < 365 hari. `tools/update-certs.sh refresh --dry-run` memastikan `certs/` masih identik dengan sumber resmi tanpa mengubah apa pun.
 - **Uji cabut daya:** build **khusus uji** dengan `MIN_REPEAT_INTERVAL 5UL`, tap berulang, cabut daya acak ≥20 kali. Hasil yang benar: tiap baris `queue_N.csv` 5 kolom, tidak ada baris menempel. Jangan rilis build ini.
 - **Soak 72 jam:** `arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200 | tee soak.log`, lalu `grep -E '\[BOOT\]|\[DIAG\]' soak.log`. `boot=` tidak naik, `abnormal=0`, `min` heap tidak turun terus, `stk` tidak mendekati 0. 72 jam **tidak** mencapai wrap `millis()` (±49 hari); itu hanya dibuktikan unit test.
 
@@ -519,7 +528,7 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 
 ## 15. Status Verifikasi
 
-**Terbukti:** build bersih tanpa warning milik kode kita (modular, `--warnings all`), unit test 71/71, OTA berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar.
+**Terbukti:** build bersih tanpa warning milik kode kita (modular, `--warnings all`), unit test 71/71, OTA berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar, `tools/build.sh` berjalan (refresh sertifikat sama dengan sumber resmi, verifikasi lolos, compile 1.343.571 byte / RAM 97.512 byte).
 
 **Belum diuji di perangkat:**
 - **28** WDT 180 detik saat sync backlog di `setup()` (log `[WDT] timeout 180000 ms` lalu `90000 ms`).
@@ -542,6 +551,8 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 - Radio WiFi: `WIFI_POWER_15dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).
 - Batas bawah remote config dinaikkan: `sync_interval_ms` 60.000 ms, `ota_check_interval_ms` 300.000 ms (batas atas 24 jam tetap).
 - Ukuran: 1.343.571 byte flash, RAM global 97.512 byte.
+- Perkakas sertifikat: `tools/update-certs.sh` (add/remove/sync/refresh), `tools/build.sh`, `certs/sources.txt`. Blok `TLS_ROOT_CA` ditulis ulang otomatis dari `certs/`.
+- Ambang peringatan masa berlaku sertifikat di `tools/verify-certs.sh` dinaikkan dari 90 ke 365 hari.
 
 ### v2.3.7
 - WDT: satu `esp_task_wdt_reconfigure()`, hasil dicek, tanpa jendela tanpa pengawasan.

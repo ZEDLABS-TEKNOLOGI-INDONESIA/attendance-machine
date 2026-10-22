@@ -2,7 +2,7 @@
 
 Firmware presensi berbasis IoT untuk ESP32-C3, dirancang untuk jaringan yang tidak stabil. Arsitekturnya *hybrid*: presensi tetap tercatat saat offline (antrean di SD card atau buffer NVS), lalu dikirim ke server saat koneksi kembali.
 
-**Versi dokumen: firmware v2.3.7.** Dokumen ini menggantikan `README.md` dan `requirements.md` lama.
+**Versi dokumen: firmware v2.3.9.**
 
 ![provisioning](provisioning.png)
 
@@ -37,7 +37,65 @@ Firmware presensi berbasis IoT untuk ESP32-C3, dirancang untuk jaringan yang tid
 
 ---
 
-## 2. Build, Library, dan Environment
+## 2. Struktur Kode
+
+Sketch dipecah menjadi modul header di `src/`. Semua modul di-include **sekali** dari `attendance-machine.ino`, sehingga tetap **satu unit kompilasi** (tanpa `extern`, tanpa masalah linkage, perilaku identik dengan versi monolit).
+
+```
+attendance-machine/
+├── attendance-machine.ino   # #include modul + setup(), loop(), pollRfidReader(), calcSleepSeconds()
+├── src/                     # modul (tabel di bawah) + pure_logic.h
+├── test/test_pure.cpp       # unit test host
+├── tools/                   # gen.py, verify-certs.sh
+├── certs/                   # salinan root CA (gtsr4.pem, isrgx1.pem)
+├── provisioning.png
+└── README.md
+```
+
+**Urutan `#include` di `.ino` adalah urutan dependensi. Jangan diubah.**
+
+| # | Berkas `src/` | Isi |
+|---|---|---|
+| 1 | `config.h` | Include library, makro konfigurasi, `FIRMWARE_VERSION`, makro log |
+| 2 | `types.h` | `FW_MARKER`, variabel `RTC_DATA_ATTR`, enum, struct |
+| 3 | `globals.h` | Objek dan variabel global, mutex, `verifyRollbackLater()`, `lockNvs`/`lockCache` |
+| 4 | `forward.h` | Deklarasi maju (fungsi yang dipakai sebelum didefinisikan) |
+| 5 | `credentials.h` | Enkripsi kredensial, `loadCredentials`, runtime config |
+| 6 | `tls.h` | `TLS_ROOT_CA`, `applyTls()` |
+| 7 | `hw_helpers.h` | `acquireSD`/`selectSD`, helper WiFi dan sinyal |
+| 8 | `watchdog.h` | `extendWdtForSync`, `restoreWdtNormal` |
+| 9 | `ui_feedback.h` | OLED on/off, `showOLED`, progress, buzzer |
+| 10 | `nvs_store.h` | NVS: waktu, scan count, boot retry |
+| 11 | `diag.h` | Diagnosis boot, pelacakan OTA (`ota_try`/`ota_bad`) |
+| 12 | `nvs_records.h` | NVS: buffer record, versi DB, scan terakhir |
+| 13 | `rfid_db.h` | Cache RFID, daftar admin |
+| 14 | `rtc_time.h` | RTC eksternal, epoch, SNTP, jadwal dim OLED |
+| 15 | `sd_log.h` | `prepareAppendLocked`, `failed_log` |
+| 16 | `queue_files.h` | Nama/iterasi file antrean, metadata |
+| 17 | `sd_health.h` | Reinit SD, health check, flush |
+| 18 | `queue_scan.h` | Pemindaian antrean, duplikat, `classifyQueueLine` |
+| 19 | `quarantine.h` | Karantina, `keepRetryRecordsLocked`, pemulihan tmp |
+| 20 | `queue_write.h` | `initSDCard`, `saveToQueue` |
+| 21 | `nvs_sync.h` | `nvsSyncToServer`, `parseSyncReply` |
+| 22 | `backoff.h` | Penghitung backoff polling |
+| 23 | `rfid_db_sync.h` | Cek versi dan unduh DB RFID |
+| 24 | `telemetry.h` | Heartbeat |
+| 25 | `remote_config.h` | Remote config |
+| 26 | `ota.h` | OTA |
+| 27 | `queue_sync.h` | `chunkedSync` dan sync antrean SD |
+| 28 | `wifi_net.h` | WiFi, `pingAPI`, state machine reconnect |
+| 29 | `scan.h` | UID, `kirimLangsung`, `kirimPresensi` |
+| 30 | `ui_standby.h` | Layar standby, animasi startup |
+| 31 | `factory_reset.h` | Factory reset |
+| 32 | `provisioning.h` | AP provisioning dan halaman web |
+| 33 | `tasks.h` | Task FreeRTOS: `taskRfid`, `taskSync`, `taskDisplay` |
+| - | `pure_logic.h` | Logika murni (tanpa Arduino), diuji di PC. Tidak di-include lewat urutan di atas, dipanggil dari `config.h` |
+
+**Menambah fungsi baru:** letakkan di modul yang sesuai. Fungsi hanya boleh memakai apa yang didefinisikan di modul bernomor lebih kecil. Bila terpaksa dipakai sebelum didefinisikan, deklarasikan di `forward.h` (`arduino-cli` tidak lagi membuat prototipe otomatis untuk kode di header).
+
+---
+
+## 3. Build, Library, dan Environment
 
 | Item | Nilai |
 |---|---|
@@ -66,9 +124,12 @@ arduino-cli compile ... --build-property compiler.cpp.extra_flags=-DLOG_LEVEL=0
 
 # Unit test host
 g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I. test/test_pure.cpp -o /tmp/test_pure && /tmp/test_pure
+
+# Verifikasi sertifikat tertanam vs certs/
+bash tools/verify-certs.sh
 ```
 
-**Ukuran v2.3.7:** 1.343.521 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%). v2.3.9 adalah 1.332.096 byte.
+**Ukuran v2.3.9:** 1.343.571 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%).
 
 Warning dari library (`#warning File not defined because __has_include(FS.h)`, `"FILE_READ" redefined`, `"FILE_WRITE" redefined`) berasal dari tabrakan makro SdFat dan `FS.h` (ditarik `WebServer.h`). Aman diabaikan. Warning lain yang muncul berarti ada masalah di kode kita.
 
@@ -78,9 +139,9 @@ Warning dari library (`#warning File not defined because __has_include(FS.h)`, `
 
 ---
 
-## 3. Aturan Pengembangan (wajib)
+## 4. Aturan Pengembangan (wajib)
 
-1. **Penempatan kode.** Fungsi pertama di `.ino` memicu `arduino-cli` menyisipkan prototipe otomatis sebelum tipe terdefinisi. Jangan menaruh fungsi di atas semua `struct`/`enum`. `verifyRollbackLater()` tetap setelah semuanya. Variabel global baru memakai tipe dasar (mis. `uint8_t`).
+1. **Penempatan kode.** Semua `struct`/`enum` ada di `src/types.h`, dimuat sebelum modul lain. Jangan memindahkan fungsi ke atas tipe. `.ino` hanya memuat `#include` lalu `setup()`/`loop()` dan pembantunya. `verifyRollbackLater()` tetap di `globals.h` (setelah semua tipe). Variabel global baru memakai tipe dasar (mis. `uint8_t`).
 2. **Urutan mutex:** `xSdMutex` dulu, baru `xCacheMutex`. Jangan memanggil fungsi yang mengambil `xSdMutex` sambil memegangnya (tidak rekursif). Fungsi lookup RFID tidak mengambil mutex SD.
 3. **`xDisplayMutex`** melindungi OLED **dan** bus I2C RTC. Akses RTC lewat `rtcBusLock()`/`rtcBusUnlock()`.
 4. **NVS (`Preferences`)** selalu lewat `lockNvs()`/`unlockNvs()`.
@@ -94,14 +155,14 @@ Warning dari library (`#warning File not defined because __has_include(FS.h)`, `
 7. **HTTPS:** setiap request membuat `WiFiClientSecure` sendiri lewat `applyTls()`. `TLS_VERIFY_CERT` harus tetap `1` di rilis.
 8. **Pola waktu millis:** gunakan `(now - t0) >= durasi` atau selisih bertanda `(long)(now - t)`. Jangan `millis() < end`.
 9. **Epoch yang dikirim ke server dan dihitung di CRC memakai `uint32`** (`unsigned long` di ESP32). `pure_logic.h` memakai `uint32_t` agar perilaku overflow identik di PC.
-10. **Logika murni** (tanpa Arduino/FreeRTOS) ada di `pure_logic.h` dan diuji di PC: `crc8`, `recordCrc8`, `backoffInterval`, `isInWindow`, `compareFirmwareVersion`, `isValidMd5Hex`, `daysFromCivil`, `parseQueueIndex`, `otaVerFeed`. Perubahan fungsi-fungsi itu wajib menjalankan `test/test_pure.cpp` (71 pemeriksaan).
+10. **Logika murni** (tanpa Arduino/FreeRTOS) ada di `src/pure_logic.h` dan diuji di PC: `crc8`, `recordCrc8`, `backoffInterval`, `isInWindow`, `compareFirmwareVersion`, `isValidMd5Hex`, `daysFromCivil`, `parseQueueIndex`, `otaVerFeed`. Perubahan fungsi-fungsi itu wajib menjalankan `test/test_pure.cpp` (71 pemeriksaan).
 11. Jangan hardcode kredensial. Jangan menambah fitur di luar kebutuhan tanpa persetujuan. Perubahan minimal dan bisa di-review.
 12. Nama device: maksimum 19 karakter, hanya huruf/angka/spasi/`-`/`_`/`.`.
 13. Versi mengikuti semver, tag git `vX.Y.Z`.
 
 ---
 
-## 4. Arsitektur Task
+## 5. Arsitektur Task
 
 ESP32-C3 hanya punya satu core. Semua task berbagi core dan saling menyela lewat preemption.
 
@@ -122,7 +183,7 @@ ESP32-C3 hanya punya satu core. Semua task berbagi core dan saling menyela lewat
 
 ---
 
-## 5. Keamanan
+## 6. Keamanan
 
 ### Kredensial
 Disimpan terenkripsi di NVS namespace `cfg` (SSID ×3, password ×3, API key, API URL, nama device):
@@ -139,16 +200,16 @@ Batas input: SSID 32, password WiFi 63, API key 95, API URL 79, nama device 19.
 - Form `/save` tidak punya autentikasi selain password AP acak dan jendela 5 menit. Dianggap cukup (password AP ≈ 2^50 kemungkinan, penyerang yang sudah join sudah tahu passwordnya).
 
 ### TLS
-- Semua HTTPS memverifikasi sertifikat dengan root CA tertanam: **GTS Root R4** (berlaku sampai 2036) dan **ISRG Root X1** (sampai 2035). Salinan di `certs/gtsr4.pem` dan `certs/isrgx1.pem`, diverifikasi dengan `tools/verify-certs.sh`.
+- Semua HTTPS memverifikasi sertifikat dengan root CA tertanam di `src/tls.h`: **GTS Root R4** (berlaku sampai 2036) dan **ISRG Root X1** (sampai 2035). Salinan di `certs/gtsr4.pem` dan `certs/isrgx1.pem`, diverifikasi dengan `tools/verify-certs.sh`.
 - **Jika backend pindah ke CA lain, semua HTTPS termasuk OTA gagal** dan tidak ada jalur pemulihan jarak jauh (harus flash USB). Perbarui `TLS_ROOT_CA` sebelum perpindahan CA.
 - Verifikasi bergantung pada jam sistem. Saat boot, NTP (UDP) berjalan **sebelum** `pingAPI()` (HTTPS). Kasus "WiFi hidup, NTP diblok" belum diuji (item 52).
 - `syncTimeWithFallback()` memakai callback SNTP nyata (`sntpSyncCount`), bukan jam sistem yang kebetulan sudah valid.
 
 ---
 
-## 6. Logika Bisnis
+## 7. Logika Bisnis
 
-### 6.1 Provisioning
+### 7.1 Provisioning
 Aktif bila flag `prov` belum diset, atau SSID1/API key/API URL kosong.
 - AP bernama `ATTENDANCE MACHINE`, password **acak 10 karakter, dibuat baru tiap masuk mode setup, tampil 2,5 detik di OLED**.
 - Captive portal (DNS + web port 80). Timeout 5 menit lalu restart (password baru).
@@ -164,10 +225,10 @@ Aktif bila flag `prov` belum diset, atau SSID1/API key/API URL kosong.
 
 **Belum ada** jalur ganti SSID/API key tanpa factory reset (provisioning tanpa wipe tidak dikerjakan).
 
-### 6.2 Boot (`setup()`)
+### 7.2 Boot (`setup()`)
 1. Timezone `WIB-7` di-set paling awal (`TZ_POSIX`). `configTzTime` memakai TZ yang sama, jadi tidak tertimpa.
 2. WDT 90 detik, OLED, buzzer, mutex, queue.
-3. `otaResolveAtBoot()` dan `bootDiagRecord()` (lihat 6.14 dan 6.15).
+3. Log statistik NVS (`[NVS] used/free`), `otaResolveAtBoot()` dan `bootDiagRecord()` (lihat 7.14 dan 7.15).
 4. Pemulihan waktu: setelah deep sleep, `lastValidTime += sleepDurationSeconds`. Cold boot: dari NVS (`timeFromNvsOnly = true`). Lalu RTC eksternal bila valid.
 5. Load kredensial, `deviceId` = nama custom atau `ESP32_XXXX` dari MAC.
 6. Init SD, load cache RFID dan daftar admin. SD gagal: pesan `SD FS RUSAK` (sdErrorCode 0, **tidak pernah format otomatis**, format FAT32 manual di PC) atau `SD CARD TIDAK TERBACA`, lanjut jalur NVS.
@@ -177,14 +238,14 @@ Aktif bila flag `prov` belum diset, atau SSID1/API key/API URL kosong.
 10. Waktu tetap tidak tepercaya: restart hingga 5 kali (counter NVS `boot_retry`), lalu lanjut offline dengan `bootTimeSyncFailed=true`.
 11. Task dibuat setelah semua selesai. Selama `setup()` WDT diperpanjang 180 detik oleh `extendWdtForSync()` saat sync backlog.
 
-### 6.3 WiFi
+### 7.3 WiFi
 - Mencoba 3 SSID berurutan. Gagal semua → offline mode.
-- Radio: `WIFI_POWER_19_5dBm`, `WIFI_PS_MAX_MODEM`, `setAutoReconnect(true)` berdampingan dengan state machine reconnect (IDLE → INIT → TRYING → SUCCESS/FAILED, rotasi SSID, retry tiap 60 detik, timeout 20 detik).
+- Radio: `WIFI_POWER_15dBm`, `WIFI_PS_MIN_MODEM`, `setAutoReconnect(true)` berdampingan dengan state machine reconnect (IDLE → INIT → TRYING → SUCCESS/FAILED, rotasi SSID, retry tiap 60 detik, timeout 20 detik).
 - `pingAPI()` membedakan "WiFi terhubung" dari "backend terjangkau". `isOnline` hanya true bila ping/heartbeat berhasil.
 - `[WIFI] disconnect reason=N` dicatat ke serial untuk diagnosis.
 - Sinyal: *weak* -85 dBm (OTA/DB/heartbeat/config dilewati), *critical* -90 dBm (NTP dan `pingAPI` dilewati). Sinyal lemah tidak dihitung kegagalan server.
 
-### 6.4 Waktu dan Kepercayaan Waktu
+### 7.4 Waktu dan Kepercayaan Waktu
 Sumber berurutan:
 1. **RTC eksternal** (opsional): menyimpan UTC, dipakai saat boot tanpa WiFi. RTC baru/baterai habis → OLED `RTC BELUM DI-SET`, diisi setelah NTP. NTP berikutnya menulis RTC hanya bila selisih > 1 detik.
 2. **NTP:** `pool.ntp.org`, `time.google.com`, `id.pool.ntp.org` (timeout 3 detik/server).
@@ -199,11 +260,11 @@ Jam menjadi tepercaya begitu RTC valid atau NTP berhasil. Bangun dari deep sleep
 
 `anchorTimeFromSystem()` menyegarkan jangkar RTC memory **hanya** dari jam sistem sungguhan, tidak pernah dari estimasi, agar batas 12 jam tidak diperpanjang oleh estimasi sendiri. Server yang membalas `TS_FUTURE`/`TS_TOO_OLD` memicu resync NTP segera.
 
-### 6.5 Health Check
+### 7.5 Health Check
 - `checkSDHealth()` tiap 30 detik membaca **sektor 0** (akses nyata). Gagal 3 kali beruntun (cek ulang tiap 5 detik) → `sdCardAvailable=false`, cache RFID dikosongkan, fallback ke HTTP/NVS. SD terdeteksi lagi → reinit dan reload tanpa restart.
 - **Watchdog:** normal 90 detik, diperpanjang 180 detik saat sync/OTA lewat `esp_task_wdt_reconfigure()` (satu panggilan, hasil dicek, task tidak pernah lepas dari pengawasan). Tiap task wajib `esp_task_wdt_reset()` tiap iterasi.
 
-### 6.6 Antrean dan Sinkronisasi (SD)
+### 7.6 Antrean dan Sinkronisasi (SD)
 - File `/queue_N.csv`, header `rfid,timestamp,device_id,unix_time,crc8`, maksimum 25 record/file, tiap record ber-CRC8. Format 5 kolom, CRLF.
 - **Anti baris parsial:** sebelum append, `prepareAppendLocked()` memeriksa byte terakhir. Bukan `\n` → ditulis `\n` dulu. File kosong → tulis header. Berlaku juga untuk `failed_log.csv` dan karantina.
 - **Duplikat:** 3 file terakhir, jendela 30 menit (`MIN_REPEAT_INTERVAL`), ditambah scan terakhir di NVS.
@@ -217,13 +278,13 @@ Jam menjadi tepercaya begitu RTC valid atau NTP berhasil. Bangun dari deep sleep
 - Metadata `/queue_meta.txt` hanya ditulis saat file aktif berpindah. Jumlah antrean dihitung ulang saat boot. `QUEUE_WARN_THRESHOLD` 48.000 file, `MAX_QUEUE_FILES` 60.000.
 - SD wajib FAT32 (batas 512 entri root pada FAT16; 60.000 file antrean butuh FAT32/exFAT). Pemindaian antrean O(n²) terhadap jumlah file: tidak terasa pada puluhan file, ditunda sampai ada data lapangan untuk ribuan file.
 
-### 6.7 Tanpa SD (buffer NVS)
+### 7.7 Tanpa SD (buffer NVS)
 - Online: `kirimLangsung()`. Gagal/offline → buffer NVS (`rec_N`, maksimum 40). Penuh → `BUFFER PENUH!`.
 - `nvsCompactAfterSync()`: menggeser record yang belum terkirim ke depan, **lalu** `putInt(count)` (titik atomik), **lalu** menghapus ekor. Listrik mati di antara langkah menghasilkan duplikat (aman, server dedup), bukan data hilang.
 - Keausan flash NVS: tiap scan sukses menulis `scan_count`, `last_rfid`, `last_scan_t`. Jumlah tulis per tahun belum dihitung untuk ≥500 scan/hari; pantau `[NVS] used/free` saat boot.
 
-### 6.8 OTA
-- Cek ke `/firmware/check` tiap 10 menit (default, bisa diubah remote config).
+### 7.8 OTA
+- Cek ke `/firmware/check` tiap 10 menit (default, bisa diubah remote config, minimum 5 menit).
 - Syarat (semua wajib): MD5 32 hex; URL `https://` dengan **host sama dengan API**; versi server lebih baru (semver); versi bukan yang pernah ditandai buruk.
 - Unduhan HTTP/1.0, stall timeout 30 detik, ukuran dicocokkan bila `Content-Length` ada, tiap `Update.write()` diperiksa.
 - **Marker versi:** binary membawa `FWVER:<versi>;` (`FW_MARKER`, atribut `used, retain`). Saat unduh, device memindai marker dan membandingkannya dengan versi server. Beda/tidak ada → batal dan versi ditolak.
@@ -232,7 +293,7 @@ Jam menjadi tepercaya begitu RTC valid atau NTP berhasil. Bangun dari deep sleep
 - **Anti loop OTA-rollback:** sebelum restart, versi yang dicoba disimpan (`ota_try`). Saat boot, bila versi berjalan ≠ `ota_try`, versi itu ditandai buruk permanen di NVS (`ota_bad`) dan tidak diunduh lagi (sampai factory reset). **Perbaikan harus memakai nomor versi baru.**
 - **Rollback armada tidak bisa dengan menurunkan versi di server**: firmware menolak versi yang tidak lebih baru. Jalurnya: rilis versi lebih tinggi berisi kode lama, atau flash USB per unit.
 
-### 6.9 Download Database RFID (sentinel `END`)
+### 7.9 Download Database RFID (sentinel `END`)
 Cloudflare membuang `Content-Length` dan `Connection`, jadi firmware memakai sentinel.
 
 ```
@@ -249,7 +310,7 @@ END
 - Cek versi tiap 5 menit. Server men-cache versi dan daftar 24 jam, dan observer menaikkan versi lewat model event. **Update massal lewat query builder tidak memicu observer** sehingga versi tidak naik.
 - Unduhan memakai `useHTTP10(true)`. Belum diuji di balik Cloudflare (item 51).
 
-### 6.10 Standby, Dim, dan Sleep
+### 7.10 Standby, Dim, dan Sleep
 - OLED: status online/offline, jam (`--:--` bila belum tepercaya), antrean (SD+NVS), bar sinyal. Hanya diperbarui saat state berubah. Mode RC522 rusak menampilkan `RC522 RUSAK`.
 - **Dim** (default 08:00-10:00): OLED mati di jendela, cek tiap 60 detik, **menyala saat scan** dan kembali ke jadwal setelah 1,8 detik.
 - **Deep sleep** (default 18:00-01:00): hanya bila waktu tepercaya dan `bootTimeSyncFailed=false`.
@@ -260,7 +321,7 @@ END
 - Jendela dengan `Mulai == Selesai` berarti fitur **nonaktif** (disengaja). `isInWindow()` mendukung jendela lewat tengah malam.
 - Untuk menguji dim via remote config, lakukan di luar jam sleep (device deep sleep di dalam jendela sleep).
 
-### 6.11 Scan RFID
+### 7.11 Scan RFID
 - `loop()` mem-poll RC522 di bawah `xSdMutex` (timeout 30 ms; bila mutex sibuk, poll dilewati dan dihitung di log `[RFID] poll dilewati`).
 - Debounce 150 ms. UID memakai **4 byte pertama** (`uidToString`, little-endian, 10 digit). Kartu 7 byte: aturan yang sama harus dipakai server.
 - **Urutan: validasi dulu, baru simpan/kirim:**
@@ -270,17 +331,17 @@ END
   4. Simpan ke antrean SD. Gagal SD → lanjut ke HTTP/NVS.
 - **Mode Admin** (`/admin_rfid.txt`, maksimum 5 UID): OLED `Q:<antrean> SC:<scan hari ini>`, set `forceSyncRequested`. Tidak mencatat presensi.
 
-### 6.12 Remote Config
+### 7.12 Remote Config
 - `GET /api/presensi/config?device_id=<id>` tiap 10 menit (dilewati bila sinyal lemah).
 - Field: `sleep_start`, `sleep_end`, `oled_dim_start`, `oled_dim_end`, `sync_interval_ms`, `ota_check_interval_ms`.
-- Jam harus 0-23. **Interval harus 5000 ms - 86.400.000 ms (24 jam)**; di luar rentang kembali ke default.
+- Jam harus 0-23. **`sync_interval_ms`: 60.000 ms - 86.400.000 ms (24 jam). `ota_check_interval_ms`: 300.000 ms - 86.400.000 ms.** Di luar rentang kembali ke default.
 - Field tidak ada atau `null` kembali ke default firmware pada respons 200 valid. Respons bukan objek JSON atau JSON rusak diabaikan.
 - Disimpan ke NVS hanya bila berubah. Jendela kosong dicatat di serial `[CFG]`.
 
-### 6.13 Backoff Polling
+### 7.13 Backoff Polling
 OTA check, versi DB, heartbeat, dan config memakai backoff eksponensial saat server gagal: interval dasar × 2^gagal, maksimum 16× dan 1 jam (kecuali dasar lebih besar). Sukses, WiFi tersambung ulang, atau reboot mereset penghitung. Respons 401/403 (mis. API key salah) ikut memicu backoff. **Tidak terkena backoff:** `chunkedSync`, `nvsSyncToServer`, `kirimLangsung`.
 
-### 6.14 Diagnosis
+### 7.14 Diagnosis
 Dicatat tiap boot dan dikirim di heartbeat:
 - `[BOOT] reset=... boot=N abnormal=M last_abn=... heap=...` (bangun dari deep sleep tidak dihitung reboot; penghitung ditulis hanya bila berubah).
 - `[DIAG] heap=... min=... blk=... stk L/R/S/D=...` tiap heartbeat (stack high-water-mark, satuan byte di ESP-IDF).
@@ -288,19 +349,19 @@ Dicatat tiap boot dan dikirim di heartbeat:
 - **Backend saat ini mengabaikan field tambahan** (tidak ditolak, tetapi tidak disimpan; tidak ada kolomnya di `presensi_devices`). Data hanya terlihat di serial sampai ada migrasi.
 - Core dump aktif: baca dengan `esptool read_flash <offset coredump> 0x10000 core.bin` lalu `esp-coredump info_corefile --core core.bin --core-format raw <elf>` (nama alat bisa `espcoredump.py` di instalasi tertentu).
 
-### 6.15 Penyimpanan Persisten
+### 7.15 Penyimpanan Persisten
 - NVS `cfg`: `ssid1-3`, `pass1-3`, `apikey`, `devname`, `apiurl` (terenkripsi), `slp_s`, `slp_e`, `dim_s`, `dim_e`, `sync_iv`, `ota_iv`, `prov`.
 - NVS `presensi`: `rec_N`, `nvs_count`, `last_time`, `rfid_db_ver`, `scan_date`, `scan_count`, `boot_retry`, `last_rfid`, `last_scan_t`, `boot_cnt`, `abn_cnt`, `last_abn`, `rc_fail`, `ota_try`, `ota_bad`.
 - RTC memory: nomor file antrean aktif, `lastValidTime`, `bootTime`, `sleepDurationSeconds`.
-- SD: `queue_N.csv`, `queue_meta.txt`, `rfid_db.txt/.bak`, `admin_rfid.txt`, `failed_log.csv/.old`, `quarantine.csv/.old`.
+- SD: `queue_N.csv`, `queue_meta.txt`, `queue_keep.tmp` (sementara), `rfid_db.txt/.bak`, `admin_rfid.txt`, `failed_log.csv/.old`, `quarantine.csv/.old`.
 
 ---
 
-## 7. Kondisi Fallback
+## 8. Kondisi Fallback
 
 | Kondisi | Penanganan |
 |---|---|
-| Sinyal lemah/kritis | Lihat 6.3 |
+| Sinyal lemah/kritis | Lihat 7.3 |
 | Antrean hampir penuh/penuh | `QUEUE HAMPIR PENUH!` (≥48.000 file) / `QUEUE PENUH!` |
 | Record rusak (CRC/format) | Masuk `quarantine.csv`, tidak dibuang diam-diam |
 | SD tidak terbaca / FS rusak | Pesan jelas, tidak pernah format otomatis, lanjut jalur HTTP/NVS |
@@ -315,11 +376,11 @@ Dicatat tiap boot dan dikirim di heartbeat:
 | Task hang | Per-task WDT → restart |
 | Firmware baru bermasalah | Gagal sebelum RC522 OK → rollback; gagal setelahnya → versi ditandai buruk (`ota_bad`) |
 | Tidur tidak aman | Task belum berhenti atau flush gagal → tidur dibatalkan, ulangi 30 detik |
-| WiFi sering lepas meski RSSI kuat | Hipotesis (belum terbukti): brownout TX burst, `MAX_MODEM`, `setAutoReconnect`. Baca `[WIFI] disconnect reason=N` dulu, ubah satu variabel per waktu |
+| WiFi sering lepas meski RSSI kuat | Hipotesis (belum terbukti): brownout saat TX burst atau power save. Kode saat ini memakai 15 dBm dan `WIFI_PS_MIN_MODEM` sebagai uji. Baca `[WIFI] disconnect reason=N` dulu, ubah satu variabel per waktu |
 
 ---
 
-## 8. Pesan OLED Hasil Scan
+## 9. Pesan OLED Hasil Scan
 
 | Pesan | Arti |
 |---|---|
@@ -341,7 +402,7 @@ Dicatat tiap boot dan dikirim di heartbeat:
 
 ---
 
-## 9. Factory Reset
+## 10. Factory Reset
 
 Tahan **BOOT** (GPIO 0). Reset berjalan setelah tombol dilepas.
 
@@ -359,7 +420,7 @@ Dihapus: NVS `cfg` dan `presensi`, kredensial WiFi driver, `rfid_db.txt/.bak`, `
 
 ---
 
-## 10. Backend (Laravel)
+## 11. Backend (Laravel)
 
 Semua route di `/api/presensi`, dilindungi `api.secret` (header `X-API-KEY`) dan rate limiter.
 
@@ -402,9 +463,9 @@ Semua route di `/api/presensi`, dilindungi `api.secret` (header `X-API-KEY`) dan
 
 ---
 
-## 11. Rilis Firmware (OTA)
+## 12. Rilis Firmware (OTA)
 
-1. Naikkan `FIRMWARE_VERSION`, komentar header, README, dan `issue.md`.
+1. Naikkan `FIRMWARE_VERSION` **dan** komentar header (`Version`), keduanya di `src/config.h`. Perbarui README (versi, ukuran, changelog, bagian 15).
 2. Build bersih dengan `--warnings all --export-binaries`.
 3. Marker dan checksum dari `.ino.bin` yang sama:
 ```bash
@@ -412,7 +473,7 @@ BIN=build/esp32.esp32.esp32c3/attendance-machine.ino.bin
 strings $BIN | grep FWVER:     # harus ada FWVER:<versi baru>; (baris "FWVER:" saja = kode pemindai)
 md5sum $BIN
 ```
-4. Salin ke `release/attendance-machine-v<versi>.bin`, perbarui `release/SHA256SUMS` (`sha256sum`), tulis `release/NOTES.md` (perubahan, breaking change, upgrade, rollback).
+4. Salin ke `release/attendance-machine-v<versi>.bin`, perbarui `release/SHA256SUMS` (`sha256sum`), tulis `release/NOTES.md` (perubahan, breaking change, upgrade, rollback). Folder `release/` tidak ter-track git; unggah binary sebagai GitHub Release asset.
 5. Unggah ke server dengan version persis `x.y.z` (tanpa `v`/spasi) dan MD5.
 6. `git commit` (Conventional Commits), `git tag -a vX.Y.Z`. Jangan `git add -A` bila ada berkas uji di folder sketch.
 7. Pantau serial: `[OTA] update=1 ver=...`, lalu setelah restart `[FW] FWVER:<versi>;`.
@@ -429,36 +490,38 @@ md5sum $BIN
 
 ---
 
-## 12. Pengujian
+## 13. Pengujian
 
-- **Unit test host:** `test/test_pure.cpp` (71 pemeriksaan: CRC, backoff, jendela sleep, semver, MD5, kalender, nama file antrean, marker versi, pola wrap millis). Lulus di v2.3.7.
-- **Skrip antrean uji:** `tools/gen.py <jumlah_file>` (RFID `9xxxxxxxxx` tidak terdaftar, format dan CRC sama dengan firmware). **Jangan menyuntik antrean palsu ke server produksi**; pakai staging. Jangan taruh hasilnya di folder sketch yang akan di-commit.
+- **Unit test host:** `test/test_pure.cpp` (71 pemeriksaan: CRC, backoff, jendela sleep, semver, MD5, kalender, nama file antrean, marker versi, pola wrap millis). Wajib lulus sebelum rilis.
+- **Skrip antrean uji:** `tools/gen.py <jumlah_file>` (RFID `9xxxxxxxxx` tidak terdaftar, format dan CRC sama dengan firmware). **Jangan menyuntik antrean palsu ke server produksi**; pakai staging. Jalankan di luar folder sketch (hasilnya `queue_N.csv` di direktori kerja) dan jangan di-commit.
+- **Verifikasi sertifikat:** `bash tools/verify-certs.sh` membandingkan `certs/*.pem` dengan blok `TLS_ROOT_CA` di `src/tls.h` dan memperingatkan bila sisa masa berlaku < 90 hari.
 - **Uji cabut daya:** build **khusus uji** dengan `MIN_REPEAT_INTERVAL 5UL`, tap berulang, cabut daya acak ≥20 kali. Hasil yang benar: tiap baris `queue_N.csv` 5 kolom, tidak ada baris menempel. Jangan rilis build ini.
 - **Soak 72 jam:** `arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200 | tee soak.log`, lalu `grep -E '\[BOOT\]|\[DIAG\]' soak.log`. `boot=` tidak naik, `abnormal=0`, `min` heap tidak turun terus, `stk` tidak mendekati 0. 72 jam **tidak** mencapai wrap `millis()` (±49 hari); itu hanya dibuktikan unit test.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Gejala | Tindakan |
 |---|---|
-| Unduhan DB RFID gagal terus | Pastikan `/rfid-list` selalu mengirim `END`. Bila bermasalah di balik Cloudflare, hapus baris `useHTTP10` di `downloadRfidDb()` saja |
+| Unduhan DB RFID gagal terus | Pastikan `/rfid-list` selalu mengirim `END`. Bila bermasalah di balik Cloudflare, hapus baris `useHTTP10` di `downloadRfidDb()` (`src/rfid_db_sync.h`) saja |
 | Scan selalu `WAKTU BELUM SYNC` / jam `--:--` | Cold boot belum dapat RTC/NTP. Pastikan UDP 123 tidak diblok. Pasang DS3231 |
 | Remote config tidak ter-apply | Cek data di DB, `device_id` persis sama, field di luar jendela sleep, tunggu 10 menit (lebih lama bila backoff), baca log `[CFG]` |
 | "Scan Hari Ini" selalu 0 | Cek `device_id` NULL di record presensi |
 | OTA tidak jalan | Versi belum dinaikkan, versi server ≠ marker, atau versi itu sudah ada di `ota_bad` (rilis nomor baru) |
 | Banyak reboot | Baca `[BOOT] reset=...` dan `abnormal=`, lalu core dump |
 | WiFi sering lepas | Baca `[WIFI] disconnect reason=N`, uji satu variabel per waktu (`WIFI_PS_NONE`, TX power) |
+| Compile: `not declared in this scope` setelah menambah fungsi | Fungsi dipakai sebelum didefinisikan. Pindahkan ke modul bernomor lebih kecil atau deklarasikan di `src/forward.h` |
 
 Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI] [WDT] [NVS] [SD] [RFID] [RC522] [SLEEP]`.
 
 ---
 
-## 14. Status Verifikasi
+## 15. Status Verifikasi
 
-**Terbukti:** build bersih tanpa warning milik kode kita, unit test 71/71, OTA 2.3.9 berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar.
+**Terbukti:** build bersih tanpa warning milik kode kita (modular, `--warnings all`), unit test 71/71, OTA berhasil di perangkat, rollback bootloader bekerja, format RFID database 0 anomali, timezone dan `app_url` server benar.
 
-**Belum diuji di perangkat** (pilot v2.3.7 menutupnya):
+**Belum diuji di perangkat:**
 - **28** WDT 180 detik saat sync backlog di `setup()` (log `[WDT] timeout 180000 ms` lalu `90000 ms`).
 - **38** Penyebab WiFi disconnect (masih hipotesis).
 - **51** `useHTTP10` untuk unduhan DB RFID di balik Cloudflare.
@@ -466,13 +529,21 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 - **64** Jam sistem bertahan saat `ESP.restart()`. Bila tidak, scan sesaat setelah restart ditolak `WAKTU BELUM SYNC` sampai NTP berhasil.
 - **66** Backoff polling (backend dimatikan lalu dinyalakan, WiFi putus-sambung).
 - Handshake tidur saat HTTP panjang, daftar admin saat SD dicabut-pasang, mode RC522 rusak, `Serial.setTxTimeoutMs` (hanya bila `SERIAL_TX_NONBLOCK=1`, default 0), starvasi `pollRfidReader` (pantau `[RFID] poll dilewati`), dampak heap `String`, delta arus `SLEEP_GPIO_HOLD`.
+- Refactor modular: kesetaraan kode dibuktikan oleh verifikasi gabungan saat pemecahan, tetapi smoke test di perangkat (boot, satu tap, satu siklus sync) belum dijalankan.
 
 **Batasan yang diterima:** enkripsi kredensial lemah terhadap dump flash, kartu admin dapat dikloning, UID memakai 4 byte pertama, pemindaian antrean O(n²) (ditunda), `/save` tanpa autentikasi tambahan, tidak ada provisioning tanpa wipe, diagnosis belum disimpan backend.
 
 ---
 
-## 15. Changelog v2.3.7
+## 16. Changelog
 
+### v2.3.9
+- Kode dipecah menjadi modul header di `src/` (tanpa perubahan logika, satu unit kompilasi). `pure_logic.h` pindah ke `src/`.
+- Radio WiFi: `WIFI_POWER_15dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).
+- Batas bawah remote config dinaikkan: `sync_interval_ms` 60.000 ms, `ota_check_interval_ms` 300.000 ms (batas atas 24 jam tetap).
+- Ukuran: 1.343.571 byte flash, RAM global 97.512 byte.
+
+### v2.3.7
 - WDT: satu `esp_task_wdt_reconfigure()`, hasil dicek, tanpa jendela tanpa pengawasan.
 - Diagnosis: reset reason, penghitung boot/abnormal, heap minimum, stack HWM, field heartbeat tambahan.
 - RC522 gagal: 3 restart lalu mode terbatas. OTA gagal/rollback ditandai (`ota_bad`) agar tidak berulang.
@@ -491,3 +562,6 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 - FreeRTOS Task + Queue + Mutex: concurrency.
 - Sentinel-based stream termination: pengganti `Content-Length` di balik reverse proxy.
 - Exponential backoff: polling server saat gagal.
+
+## Lisensi
+Lihat `LICENSE`.

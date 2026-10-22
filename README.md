@@ -2,9 +2,9 @@
 
 Firmware presensi berbasis IoT untuk ESP32-C3, dirancang untuk jaringan yang tidak stabil. Arsitekturnya *hybrid*: presensi tetap tercatat saat offline (antrean di SD card atau buffer NVS), lalu dikirim ke server saat koneksi kembali.
 
-**Versi dokumen: firmware v2.3.9.**
+**Versi dokumen: firmware v2.3.8.**
 
-![provisioning](provisioning.png)
+![provisioning](assets/provisioning.png)
 
 ---
 
@@ -46,9 +46,9 @@ attendance-machine/
 ├── attendance-machine.ino   # #include modul + setup(), loop(), pollRfidReader(), calcSleepSeconds()
 ├── src/                     # modul (tabel di bawah) + pure_logic.h
 ├── test/test_pure.cpp       # unit test host
+├── assets/provisioning.png
 ├── tools/                   # gen.py, verify-certs.sh
 ├── certs/                   # salinan root CA (gtsr4.pem, isrgx1.pem)
-├── provisioning.png
 └── README.md
 ```
 
@@ -129,7 +129,7 @@ g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -I. test/test_pure.cpp
 bash tools/verify-certs.sh
 ```
 
-**Ukuran v2.3.9:** 1.343.571 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%).
+**Ukuran v2.3.8:** 1.343.571 byte flash (68% dari 1.966.080), RAM global 97.512 byte (29%).
 
 Warning dari library (`#warning File not defined because __has_include(FS.h)`, `"FILE_READ" redefined`, `"FILE_WRITE" redefined`) berasal dari tabrakan makro SdFat dan `FS.h` (ditarik `WebServer.h`). Aman diabaikan. Warning lain yang muncul berarti ada masalah di kode kita.
 
@@ -537,7 +537,7 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 
 ## 16. Changelog
 
-### v2.3.9
+### v2.3.8
 - Kode dipecah menjadi modul header di `src/` (tanpa perubahan logika, satu unit kompilasi). `pure_logic.h` pindah ke `src/`.
 - Radio WiFi: `WIFI_POWER_15dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).
 - Batas bawah remote config dinaikkan: `sync_interval_ms` 60.000 ms, `ota_check_interval_ms` 300.000 ms (batas atas 24 jam tetap).

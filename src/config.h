@@ -8,7 +8,7 @@
  * Author           : Yahya Zulfikri
  * Created          : Juli 2025
  * Updated          : Oktober 2026
- * Version          : 2.3.9
+ * Version          : 2.3.8
  */
 
 #include <WiFi.h>
@@ -129,7 +129,7 @@
 #define OLED_DIM_END_HOUR_DEFAULT 10
 #define SIGNAL_THRESHOLD_WEAK -85
 #define SIGNAL_THRESHOLD_CRITICAL -90
-#define FIRMWARE_VERSION "2.3.9"
+#define FIRMWARE_VERSION "2.3.8"
 #define PROV_AP_SSID "ATTENDANCE MACHINE"
 #define PROV_DNS_PORT 53
 #define TASK_RFID_STACK 8192

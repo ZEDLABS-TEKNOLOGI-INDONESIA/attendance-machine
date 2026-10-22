@@ -1,10 +1,7 @@
-#!/usr/bin/env bash
-# tools/verify-certs-v2.sh  (ASUMSI: blok PEM di .ino berada dalam raw string R"EOF(...)EOF")
 set -euo pipefail
-INO="${1:-attendance-machine.ino}"
+INO="${1:-src/tls.h}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-# Pisahkan semua blok PEM dari .ino menjadi file terpisah
 awk -v d="$TMP" '
   /-----BEGIN CERTIFICATE-----/ {n++; f=sprintf("%s/ino_%02d.pem", d, n); on=1}
   on {print > f}

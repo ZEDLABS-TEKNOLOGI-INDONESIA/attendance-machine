@@ -214,6 +214,33 @@ Batas input: SSID 32, password WiFi 63, API key 95, API URL 79, nama device 19.
 - Verifikasi bergantung pada jam sistem. Saat boot, NTP (UDP) berjalan **sebelum** `pingAPI()` (HTTPS). Kasus "WiFi hidup, NTP diblok" belum diuji (item 52).
 - `syncTimeWithFallback()` memakai callback SNTP nyata (`sntpSyncCount`), bukan jam sistem yang kebetulan sudah valid.
 
+
+### Mengelola root CA (tanpa copy-paste)
+
+Blok `TLS_ROOT_CA` di `src/tls.h` ditulis ulang otomatis dari `certs/*.pem`. Jangan menempel sertifikat manual.
+
+| Perintah | Fungsi |
+|---|---|
+| `tools/update-certs.sh refresh [--offline] [--dry-run]` | Bandingkan tiap entri `certs/sources.txt` dengan sumber resminya, lalu `sync`. Dipakai otomatis oleh `tools/build.sh` |
+| `tools/update-certs.sh add <nama> <url\|berkas> [--fp SHA256]` | Unduh, validasi, simpan ke `certs/<nama>.pem`, catat di `sources.txt`, tulis ulang `tls.h` |
+| `tools/update-certs.sh remove <nama>` | Hapus root (konfirmasi `YA`, tidak boleh yang terakhir), tulis ulang `tls.h` |
+| `tools/update-certs.sh sync [--dry-run]` | Tulis ulang `tls.h` dari `certs/*.pem` |
+
+**Prinsip keamanan.**
+- Isi `certs/*.pem` yang ter-commit adalah jangkar kepercayaan. `refresh` hanya memastikan sumber resmi masih identik. Bila **berbeda, build berhenti** dan tidak ada yang ditimpa otomatis.
+- Root baru hanya masuk lewat `add` dengan konfirmasi sidik jari SHA-256 terhadap halaman resmi CA (`--fp` untuk non-interaktif).
+- Sertifikat kedaluwarsa menghentikan build. Sisa masa berlaku < 365 hari hanya memberi peringatan.
+- Tanpa internet, build tetap jalan dengan salinan lokal dan peringatan.
+- Skrip tidak menaikkan `FIRMWARE_VERSION` dan tidak mengompilasi.
+
+**Mengganti atau menambah root CA:**
+1. `tools/update-certs.sh add <nama> <url> --dry-run`, cocokkan sidik jari dengan halaman resmi CA.
+2. Jalankan tanpa `--dry-run`. Root lama dipertahankan selama masa transisi.
+3. Naikkan `FIRMWARE_VERSION` di `src/config.h`, jalankan `tools/build.sh`, pilot 1-2 unit, lalu rilis OTA (bagian 12).
+4. Setelah seluruh armada melaporkan versi baru, `tools/update-certs.sh remove <nama-lama>` pada rilis berikutnya.
+
+Root yang tertanam saat ini bersumber dari `pki.goog` (GTS R4) dan `letsencrypt.org` (ISRG X1).
+
 ---
 
 ## 7. Logika Bisnis
@@ -520,6 +547,7 @@ md5sum $BIN
 | OTA tidak jalan | Versi belum dinaikkan, versi server ≠ marker, atau versi itu sudah ada di `ota_bad` (rilis nomor baru) |
 | Banyak reboot | Baca `[BOOT] reset=...` dan `abnormal=`, lalu core dump |
 | WiFi sering lepas | Baca `[WIFI] disconnect reason=N`, uji satu variabel per waktu (`WIFI_PS_NONE`, TX power) |
+| Semua HTTPS gagal padahal WiFi tersambung (`[OTA] check HTTP -1`, `API GAGAL`) | Cek jam dulu (`[TIME]`, item 52). Lalu cek rantai server: `openssl s_client -connect <host>:443 -servername <host> -showcerts </dev/null \| grep -E '^ *[0-9]+ s:\|^ *i:'`. Bila root yang dipakai bukan GTS R4/ISRG X1, tambahkan lewat `tools/update-certs.sh add`. Mesin yang sudah tidak bisa OTA harus flash USB tanpa `erase-flash` (NVS dan antrean SD tetap utuh) |
 | Compile: `not declared in this scope` setelah menambah fungsi | Fungsi dipakai sebelum didefinisikan. Pindahkan ke modul bernomor lebih kecil atau deklarasikan di `src/forward.h` |
 
 Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI] [WDT] [NVS] [SD] [RFID] [RC522] [SLEEP]`.

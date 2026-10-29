@@ -574,6 +574,9 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 
 ## 16. Changelog
 
+### v2.3.9
+- Set Max Power Wifi to 19.5dBm
+
 ### v2.3.8
 - Kode dipecah menjadi modul header di `src/` (tanpa perubahan logika, satu unit kompilasi). `pure_logic.h` pindah ke `src/`.
 - Radio WiFi: `WIFI_POWER_19_5dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).

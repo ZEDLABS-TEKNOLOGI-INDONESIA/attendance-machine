@@ -276,7 +276,7 @@ Aktif bila flag `prov` belum diset, atau SSID1/API key/API URL kosong.
 
 ### 7.3 WiFi
 - Mencoba 3 SSID berurutan. Gagal semua → offline mode.
-- Radio: `WIFI_POWER_15dBm`, `WIFI_PS_MIN_MODEM`, `setAutoReconnect(true)` berdampingan dengan state machine reconnect (IDLE → INIT → TRYING → SUCCESS/FAILED, rotasi SSID, retry tiap 60 detik, timeout 20 detik).
+- Radio: `WIFI_POWER_19_5dBm`, `WIFI_PS_MIN_MODEM`, `setAutoReconnect(true)` berdampingan dengan state machine reconnect (IDLE → INIT → TRYING → SUCCESS/FAILED, rotasi SSID, retry tiap 60 detik, timeout 20 detik).
 - `pingAPI()` membedakan "WiFi terhubung" dari "backend terjangkau". `isOnline` hanya true bila ping/heartbeat berhasil.
 - `[WIFI] disconnect reason=N` dicatat ke serial untuk diagnosis.
 - Sinyal: *weak* -85 dBm (OTA/DB/heartbeat/config dilewati), *critical* -90 dBm (NTP dan `pingAPI` dilewati). Sinyal lemah tidak dihitung kegagalan server.
@@ -576,7 +576,7 @@ Log serial 115200 baud. Tag: `[FW] [BOOT] [DIAG] [RTC] [TIME] [OTA] [CFG] [WIFI]
 
 ### v2.3.8
 - Kode dipecah menjadi modul header di `src/` (tanpa perubahan logika, satu unit kompilasi). `pure_logic.h` pindah ke `src/`.
-- Radio WiFi: `WIFI_POWER_15dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).
+- Radio WiFi: `WIFI_POWER_19_5dBm` dan `WIFI_PS_MIN_MODEM` (uji item 38).
 - Batas bawah remote config dinaikkan: `sync_interval_ms` 60.000 ms, `ota_check_interval_ms` 300.000 ms (batas atas 24 jam tetap).
 - Ukuran: 1.343.571 byte flash, RAM global 97.512 byte.
 - Perkakas sertifikat: `tools/update-certs.sh` (add/remove/sync/refresh), `tools/build.sh`, `certs/sources.txt`. Blok `TLS_ROOT_CA` ditulis ulang otomatis dari `certs/`.

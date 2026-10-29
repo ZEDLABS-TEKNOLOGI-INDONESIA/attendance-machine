@@ -1,4 +1,12 @@
 #pragma once
+
+// Ubah di sini untuk menguji level lain jika 19.5 dBm tidak stabil
+// Pilihan: WIFI_POWER_8_5dBm, WIFI_POWER_11dBm, WIFI_POWER_13dBm,
+//          WIFI_POWER_15dBm, WIFI_POWER_17dBm, WIFI_POWER_19_5dBm
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_19_5dBm
+#endif
+
 static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
 {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
@@ -11,15 +19,17 @@ bool connectToWifi(int ssidIdx)
   {
     return false;
   }
+
   WiFi.mode(WIFI_STA);
   WiFi.enableIPv6(false);
-  WiFi.disconnect(false);
+  WiFi.disconnect(false); // bersihkan sesi lama SEBELUM begin
   delay(100);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
-  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+  WiFi.setTxPower(WIFI_TX_POWER);
+  WiFi.setSleep(WIFI_PS_NONE);
   WiFi.begin(wifiCreds[ssidIdx].ssid, wifiCreds[ssidIdx].pass);
-  WiFi.setTxPower(WIFI_POWER_15dBm);
+
   for (int i = 0; i < 20 && !isWifiConnected(); i++)
   {
     esp_task_wdt_reset();
@@ -39,6 +49,7 @@ bool connectToWifi(int ssidIdx)
       xSemaphoreGive(xDisplayMutex);
     }
   }
+
   if (isWifiConnected())
   {
     char buf[20];
@@ -101,10 +112,14 @@ void processReconnect()
       }
     }
     break;
+
   case RECONNECT_INIT:
     WiFi.disconnect(false);
     delay(100);
-    WiFi.setSleep(WIFI_PS_MIN_MODEM);
+    WiFi.enableIPv6(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.setTxPower(WIFI_TX_POWER);
+    WiFi.setSleep(WIFI_PS_NONE);
     {
       int nextIdx = (currentSsidIdx + 1) % 3;
       for (int i = 0; i < 3; i++)
@@ -112,9 +127,7 @@ void processReconnect()
         int idx = (nextIdx + i) % 3;
         if (strlen(wifiCreds[idx].ssid) > 0)
         {
-          WiFi.enableIPv6(false);
           WiFi.begin(wifiCreds[idx].ssid, wifiCreds[idx].pass);
-          WiFi.setTxPower(WIFI_POWER_15dBm);
           currentSsidIdx = idx;
           break;
         }
@@ -123,12 +136,14 @@ void processReconnect()
     reconnectStartTime = millis();
     reconnectState = RECONNECT_TRYING;
     break;
+
   case RECONNECT_TRYING:
     if (isWifiConnected())
       reconnectState = RECONNECT_SUCCESS;
     else if (millis() - reconnectStartTime >= RECONNECT_TIMEOUT)
       reconnectState = RECONNECT_FAILED;
     break;
+
   case RECONNECT_SUCCESS:
     resetPollBackoff();
     timers.lastTelemetry = 0;
@@ -154,6 +169,7 @@ void processReconnect()
     }
     reconnectState = RECONNECT_IDLE;
     break;
+
   case RECONNECT_FAILED:
     isOnline = false;
     reconnectState = RECONNECT_IDLE;
